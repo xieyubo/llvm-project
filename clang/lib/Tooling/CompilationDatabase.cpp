@@ -65,8 +65,8 @@ CompilationDatabase::loadFromDirectory(StringRef BuildDirectory,
                                        std::string &ErrorMessage) {
   llvm::raw_string_ostream ErrorStream(ErrorMessage);
   for (CompilationDatabasePluginRegistry::iterator
-       It = CompilationDatabasePluginRegistry::begin(),
-       Ie = CompilationDatabasePluginRegistry::end();
+           It = CompilationDatabasePluginRegistry::begin(),
+           Ie = CompilationDatabasePluginRegistry::end();
        It != Ie; ++It) {
     std::string DatabaseErrorMessage;
     std::unique_ptr<CompilationDatabasePlugin> Plugin(It->instantiate());
@@ -113,7 +113,7 @@ CompilationDatabase::autoDetectFromSource(StringRef SourceFile,
 
   if (!DB)
     ErrorMessage = ("Could not auto-detect compilation database for file \"" +
-                   SourceFile + "\"\n" + ErrorMessage).str();
+                    SourceFile + "\"\n" + ErrorMessage).str();
   return DB;
 }
 
@@ -353,6 +353,19 @@ FixedCompilationDatabase::loadFromCommandLine(int &Argc,
   std::vector<const char *> CommandLine(DoubleDash + 1, Argv + Argc);
   Argc = DoubleDash - Argv;
 
+  // If find "--driver-mode" option, we need insert this option to CommandLine,
+  // so that Driver can be set to correct driver mode.
+  const std::string DriverModePrefix =
+      driver::getDriverOptTable()
+          .getOption(driver::options::OPT_driver_mode)
+          .getPrefixedName();
+  for (int i = 0; i < Argc; ++i) {
+    if (llvm::StringRef(Argv[i]).startswith(DriverModePrefix)) {
+      CommandLine.insert(CommandLine.begin(), Argv[i]);
+      break;
+    }
+  }
+
   std::vector<std::string> StrippedArgs;
   if (!stripPositionalArgs(CommandLine, StrippedArgs, ErrorMsg))
     return nullptr;
@@ -406,7 +419,7 @@ class FixedCompilationDatabasePlugin : public CompilationDatabasePlugin {
 } // namespace
 
 static CompilationDatabasePluginRegistry::Add<FixedCompilationDatabasePlugin>
-X("fixed-compilation-database", "Reads plain-text flags file");
+    X("fixed-compilation-database", "Reads plain-text flags file");
 
 namespace clang {
 namespace tooling {

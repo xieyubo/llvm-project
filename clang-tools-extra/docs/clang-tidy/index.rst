@@ -134,6 +134,12 @@ An overview of all the command-line options:
                                      When the value is empty, clang-tidy will
                                      attempt to find a file named .clang-tidy for
                                      each source file in its parent directories.
+    --driver-mode                  -
+                                     Specify the driver mode:
+                                       - gcc: gcc mode
+                                       - g++: g++ mode
+                                       - cpp: cpp mode
+                                       - cl:  cl  mode
     --dump-config                  -
                                      Dumps configuration in the YAML format to
                                      stdout. This option can be used along with a

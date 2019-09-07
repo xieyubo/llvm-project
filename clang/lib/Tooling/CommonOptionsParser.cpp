@@ -23,6 +23,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/Driver/Options.h"
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
 #include "llvm/Support/CommandLine.h"
@@ -91,6 +92,21 @@ llvm::Error CommonOptionsParser::init(
   static cl::list<std::string> SourcePaths(
       cl::Positional, cl::desc("<source0> [... <sourceN>]"), OccurrencesFlag,
       cl::cat(Category), cl::sub(*cl::AllSubCommands));
+
+  static cl::list<std::string> DriverMode(
+	  "driver-mode", cl::desc(R"(
+Specify the driver mode:
+  - gcc: gcc mode
+  - g++: g++ mode
+  - cpp: cpp mode
+  - cl:  cl  mode
+)"),
+      cl::Optional, cl::cat(Category),
+      cl::sub(*cl::AllSubCommands));
+
+  assert(driver::getDriverOptTable()
+             .getOption(driver::options::OPT_driver_mode)
+             .getPrefixedName() == "--driver-mode=");
 
   static cl::list<std::string> ArgsAfter(
       "extra-arg",
