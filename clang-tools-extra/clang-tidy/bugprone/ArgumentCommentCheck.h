@@ -11,6 +11,7 @@
 
 #include "../ClangTidyCheck.h"
 #include "llvm/Support/Regex.h"
+#include <unordered_set>
 
 namespace clang {
 namespace tidy {
@@ -42,6 +43,7 @@ public:
 private:
   const unsigned StrictMode : 1;
   const unsigned IgnoreSingleArgument : 1;
+  const unsigned IgnoreStdFunctionArguments : 1;
   const unsigned CommentBoolLiterals : 1;
   const unsigned CommentIntegerLiterals : 1;
   const unsigned CommentFloatLiterals : 1;
@@ -50,6 +52,8 @@ private:
   const unsigned CommentCharacterLiterals : 1;
   const unsigned CommentNullPtrs : 1;
   llvm::Regex IdentRE;
+  std::unordered_set<unsigned> StdFileIDs;
+  std::unordered_set<unsigned> NotStdFileIDs;
 
   void checkCallArgs(ASTContext *Ctx, const FunctionDecl *Callee,
                      SourceLocation ArgBeginLoc,

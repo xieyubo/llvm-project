@@ -32,6 +32,10 @@ Options
 
    When true, the check will ignore the single argument.
 
+.. option:: IgnoreStdFunctionArguments
+
+   When true, the check will ignore functions declared in standard libraries.
+
 .. option:: CommentBoolLiterals
 
    When true, the check will add argument comments in the format

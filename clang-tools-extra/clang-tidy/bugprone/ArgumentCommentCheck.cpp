@@ -25,6 +25,7 @@ ArgumentCommentCheck::ArgumentCommentCheck(StringRef Name,
     : ClangTidyCheck(Name, Context),
       StrictMode(Options.getLocalOrGlobal("StrictMode", 0) != 0),
       IgnoreSingleArgument(Options.get("IgnoreSingleArgument", 0) != 0),
+      IgnoreStdFunctionArguments(Options.get("IgnoreStdFunctionArguments", 0) != 0),
       CommentBoolLiterals(Options.get("CommentBoolLiterals", 0) != 0),
       CommentIntegerLiterals(Options.get("CommentIntegerLiterals", 0) != 0),
       CommentFloatLiterals(Options.get("CommentFloatLiterals", 0) != 0),
@@ -38,6 +39,7 @@ ArgumentCommentCheck::ArgumentCommentCheck(StringRef Name,
 void ArgumentCommentCheck::storeOptions(ClangTidyOptions::OptionMap &Opts) {
   Options.store(Opts, "StrictMode", StrictMode);
   Options.store(Opts, "IgnoreSingleArgument", IgnoreSingleArgument);
+  Options.store(Opts, "IgnoreStdFunctionArguments", IgnoreStdFunctionArguments);
   Options.store(Opts, "CommentBoolLiterals", CommentBoolLiterals);
   Options.store(Opts, "CommentIntegerLiterals", CommentIntegerLiterals);
   Options.store(Opts, "CommentFloatLiterals", CommentFloatLiterals);
@@ -253,6 +255,52 @@ void ArgumentCommentCheck::checkCallArgs(ASTContext *Ctx,
   unsigned NumArgs = std::min<unsigned>(Args.size(), Callee->getNumParams());
   if ((NumArgs == 0) || (IgnoreSingleArgument && NumArgs == 1))
     return;
+
+  if (IgnoreStdFunctionArguments) {
+    const SourceManager& SourceMgr = Ctx->getSourceManager();
+    const FileID FileId = SourceMgr.getFileID(Callee->getLocation());
+    const unsigned int FileIdHash = FileId.getHashValue();
+    if (StdFileIDs.find(FileIdHash) != StdFileIDs.end()) {
+      // The function is declared in a standard library header file.
+      // Ignore the argument comment check.
+      return;
+    }
+
+    if (NotStdFileIDs.find(FileIdHash) == NotStdFileIDs.end()) {
+      // Currently, we don't know whether this function is declared
+      // in a standard library header file or not. Let's make the
+      // following assumption: if the header file of this function
+      // exists under the same folder (or sub folder) of <string>
+      // or <stdio.h>, we assume this function is declared in a
+      // header file of standard library.
+      const FileEntry* FileEntry = SourceMgr.getFileEntryForID(FileId);
+      if (FileEntry) {
+        llvm::StringRef Path = FileEntry->tryGetRealPathName();
+        while (llvm::sys::path::has_parent_path(Path)) {
+          Path = llvm::sys::path::parent_path(Path);
+          SmallString<256> StdStringFilePath = Path, StdioFilePath = Path;
+          llvm::sys::path::append(StdStringFilePath, "string");
+          llvm::sys::path::append(StdioFilePath, "stdio.h");
+          if (llvm::sys::fs::exists(StdStringFilePath) ||
+              llvm::sys::fs::exists(StdioFilePath)) {
+            // Find <string> or <stdio.h> in the same folder or
+            // one of the parent folder. Assume the function is
+            // declared in a standard library header file also.
+            // Save the file id hash for next check and ignore
+            // the argument comment check.
+            StdFileIDs.insert(FileIdHash);
+            return;
+          }
+        }
+      }
+      // Can't find <string> or <stdio.h> in the same folder or
+      // all of the parent folders. Assume the function is not
+      // declared in a header file of standard library. Save the
+      // file id hash for next check and continue the argument
+      // comment check.
+      NotStdFileIDs.insert(FileIdHash);
+    }
+  }
 
   auto MakeFileCharRange = [Ctx](SourceLocation Begin, SourceLocation End) {
     return Lexer::makeFileCharRange(CharSourceRange::getCharRange(Begin, End),
