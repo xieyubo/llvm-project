@@ -510,12 +510,19 @@ void X86PassConfig::addPreEmitPass() {
 }
 
 void X86PassConfig::addPreEmitPass2() {
+  const Triple &TT = TM->getTargetTriple();
+  const MCAsmInfo *MAI = TM->getMCAsmInfo();
+
   addPass(createX86RetpolineThunksPass());
+
+  // Insert extra int3 instructions after trailing call instructions to avoid
+  // issues in the unwinder.
+  if (TT.isOSWindows() && TT.getArch() == Triple::x86_64)
+    addPass(createX86AvoidTrailingCallPass());
+
   // Verify basic block incoming and outgoing cfa offset and register values and
   // correct CFA calculation rule where needed by inserting appropriate CFI
   // instructions.
-  const Triple &TT = TM->getTargetTriple();
-  const MCAsmInfo *MAI = TM->getMCAsmInfo();
   if (!TT.isOSDarwin() &&
       (!TT.isOSWindows() ||
        MAI->getExceptionHandlingType() == ExceptionHandling::DwarfCFI))

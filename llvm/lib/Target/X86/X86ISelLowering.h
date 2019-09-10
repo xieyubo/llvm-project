@@ -531,9 +531,6 @@ namespace llvm {
       // Windows's _chkstk call to do stack probing.
       WIN_ALLOCA,
 
-      // Expands to int3 or nothing, depending on basic block layout.
-      SEH_NORETURN,
-
       // For allocating variable amounts of stack space when using
       // segmented stacks. Check if the current stacklet has enough space, and
       // falls back to heap allocation if not.
@@ -1391,6 +1388,9 @@ namespace llvm {
     LoadInst *
     lowerIdempotentRMWIntoFencedLoad(AtomicRMWInst *AI) const override;
 
+    bool lowerAtomicStoreAsStoreSDNode(const StoreInst &SI) const override;
+    bool lowerAtomicLoadAsLoadSDNode(const LoadInst &LI) const override;
+
     bool needsCmpXchgNb(Type *MemType) const;
 
     void SetupEntryBlockForSjLj(MachineInstr &MI, MachineBasicBlock *MBB,
@@ -1481,6 +1481,9 @@ namespace llvm {
 
     /// Reassociate floating point divisions into multiply by reciprocal.
     unsigned combineRepeatedFPDivisors() const override;
+
+    SDValue BuildSDIVPow2(SDNode *N, const APInt &Divisor, SelectionDAG &DAG,
+                          SmallVectorImpl<SDNode *> &Created) const override;
   };
 
   namespace X86 {

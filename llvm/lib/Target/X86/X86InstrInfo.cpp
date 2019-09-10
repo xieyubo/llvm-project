@@ -497,9 +497,11 @@ bool X86InstrInfo::isReallyTriviallyReMaterializable(const MachineInstr &MI,
   case X86::AVX512_512_SETALLONES:
   case X86::AVX512_FsFLD0SD:
   case X86::AVX512_FsFLD0SS:
+  case X86::AVX512_FsFLD0F128:
   case X86::AVX_SET0:
   case X86::FsFLD0SD:
   case X86::FsFLD0SS:
+  case X86::FsFLD0F128:
   case X86::KSET0D:
   case X86::KSET0Q:
   case X86::KSET0W:
@@ -3616,8 +3618,9 @@ bool X86InstrInfo::optimizeCompareInstr(MachineInstr &CmpInstr, unsigned SrcReg,
   if (!IsCmpZero && !Sub)
     return false;
 
-  bool IsSwapped = (SrcReg2 != 0 && Sub->getOperand(1).getReg() == SrcReg2 &&
-                    Sub->getOperand(2).getReg() == SrcReg);
+  bool IsSwapped =
+      (SrcReg2 != 0 && Sub && Sub->getOperand(1).getReg() == SrcReg2 &&
+       Sub->getOperand(2).getReg() == SrcReg);
 
   // Scan forward from the instruction after CmpInstr for uses of EFLAGS.
   // It is safe to remove CmpInstr if EFLAGS is redefined or killed.
@@ -4025,6 +4028,7 @@ bool X86InstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
   case X86::V_SET0:
   case X86::FsFLD0SS:
   case X86::FsFLD0SD:
+  case X86::FsFLD0F128:
     return Expand2AddrUndef(MIB, get(HasAVX ? X86::VXORPSrr : X86::XORPSrr));
   case X86::AVX_SET0: {
     assert(HasAVX && "AVX not supported");
@@ -4038,7 +4042,8 @@ bool X86InstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
   }
   case X86::AVX512_128_SET0:
   case X86::AVX512_FsFLD0SS:
-  case X86::AVX512_FsFLD0SD: {
+  case X86::AVX512_FsFLD0SD:
+  case X86::AVX512_FsFLD0F128: {
     bool HasVLX = Subtarget.hasVLX();
     Register SrcReg = MIB->getOperand(0).getReg();
     const TargetRegisterInfo *TRI = &getRegisterInfo();
@@ -4805,6 +4810,7 @@ MachineInstr *X86InstrInfo::foldMemoryOperandImpl(
   if (I != nullptr) {
     unsigned Opcode = I->DstOp;
     unsigned MinAlign = (I->Flags & TB_ALIGN_MASK) >> TB_ALIGN_SHIFT;
+    MinAlign = MinAlign ? 1 << (MinAlign - 1) : 0;
     if (Align < MinAlign)
       return nullptr;
     bool NarrowToMOV32rm = false;
@@ -5150,6 +5156,8 @@ MachineInstr *X86InstrInfo::foldMemoryOperandImpl(
     case X86::V_SET0:
     case X86::V_SETALLONES:
     case X86::AVX512_128_SET0:
+    case X86::FsFLD0F128:
+    case X86::AVX512_FsFLD0F128:
       Alignment = 16;
       break;
     case X86::MMX_SET0:
@@ -5199,7 +5207,9 @@ MachineInstr *X86InstrInfo::foldMemoryOperandImpl(
   case X86::FsFLD0SD:
   case X86::AVX512_FsFLD0SD:
   case X86::FsFLD0SS:
-  case X86::AVX512_FsFLD0SS: {
+  case X86::AVX512_FsFLD0SS:
+  case X86::FsFLD0F128:
+  case X86::AVX512_FsFLD0F128: {
     // Folding a V_SET0 or V_SETALLONES as a load, to ease register pressure.
     // Create a constant-pool entry and operands to load from it.
 
@@ -5229,6 +5239,8 @@ MachineInstr *X86InstrInfo::foldMemoryOperandImpl(
       Ty = Type::getFloatTy(MF.getFunction().getContext());
     else if (Opc == X86::FsFLD0SD || Opc == X86::AVX512_FsFLD0SD)
       Ty = Type::getDoubleTy(MF.getFunction().getContext());
+    else if (Opc == X86::FsFLD0F128 || Opc == X86::AVX512_FsFLD0F128)
+      Ty = Type::getFP128Ty(MF.getFunction().getContext());
     else if (Opc == X86::AVX512_512_SET0 || Opc == X86::AVX512_512_SETALLONES)
       Ty = VectorType::get(Type::getInt32Ty(MF.getFunction().getContext()),16);
     else if (Opc == X86::AVX2_SETALLONES || Opc == X86::AVX_SET0 ||
@@ -5310,6 +5322,51 @@ extractStoreMMOs(ArrayRef<MachineMemOperand *> MMOs, MachineFunction &MF) {
   return StoreMMOs;
 }
 
+static unsigned getBroadcastOpcode(const X86MemoryFoldTableEntry *I,
+                                   const TargetRegisterClass *RC,
+                                   const X86Subtarget &STI) {
+  assert(STI.hasAVX512() && "Expected at least AVX512!");
+  unsigned SpillSize = STI.getRegisterInfo()->getSpillSize(*RC);
+  assert((SpillSize == 64 || STI.hasVLX()) &&
+         "Can't broadcast less than 64 bytes without AVX512VL!");
+
+  switch (I->Flags & TB_BCAST_MASK) {
+  default: llvm_unreachable("Unexpected broadcast type!");
+  case TB_BCAST_D:
+    switch (SpillSize) {
+    default: llvm_unreachable("Unknown spill size");
+    case 16: return X86::VPBROADCASTDZ128m;
+    case 32: return X86::VPBROADCASTDZ256m;
+    case 64: return X86::VPBROADCASTDZm;
+    }
+    break;
+  case TB_BCAST_Q:
+    switch (SpillSize) {
+    default: llvm_unreachable("Unknown spill size");
+    case 16: return X86::VPBROADCASTQZ128m;
+    case 32: return X86::VPBROADCASTQZ256m;
+    case 64: return X86::VPBROADCASTQZm;
+    }
+    break;
+  case TB_BCAST_SS:
+    switch (SpillSize) {
+    default: llvm_unreachable("Unknown spill size");
+    case 16: return X86::VBROADCASTSSZ128m;
+    case 32: return X86::VBROADCASTSSZ256m;
+    case 64: return X86::VBROADCASTSSZm;
+    }
+    break;
+  case TB_BCAST_SD:
+    switch (SpillSize) {
+    default: llvm_unreachable("Unknown spill size");
+    case 16: return X86::VMOVDDUPZ128rm;
+    case 32: return X86::VBROADCASTSDZ256m;
+    case 64: return X86::VBROADCASTSDZm;
+    }
+    break;
+  }
+}
+
 bool X86InstrInfo::unfoldMemoryOperand(
     MachineFunction &MF, MachineInstr &MI, unsigned Reg, bool UnfoldLoad,
     bool UnfoldStore, SmallVectorImpl<MachineInstr *> &NewMIs) const {
@@ -5320,6 +5377,7 @@ bool X86InstrInfo::unfoldMemoryOperand(
   unsigned Index = I->Flags & TB_INDEX_MASK;
   bool FoldedLoad = I->Flags & TB_FOLDED_LOAD;
   bool FoldedStore = I->Flags & TB_FOLDED_STORE;
+  bool FoldedBCast = I->Flags & TB_FOLDED_BCAST;
   if (UnfoldLoad && !FoldedLoad)
     return false;
   UnfoldLoad &= FoldedLoad;
@@ -5328,6 +5386,7 @@ bool X86InstrInfo::unfoldMemoryOperand(
   UnfoldStore &= FoldedStore;
 
   const MCInstrDesc &MCID = get(Opc);
+
   const TargetRegisterClass *RC = getRegClass(MCID, Index, &RI, MF);
   const TargetRegisterInfo &TRI = *MF.getSubtarget().getRegisterInfo();
   // TODO: Check if 32-byte or greater accesses are slow too?
@@ -5353,12 +5412,19 @@ bool X86InstrInfo::unfoldMemoryOperand(
       AfterOps.push_back(Op);
   }
 
-  // Emit the load instruction.
+  // Emit the load or broadcast instruction.
   if (UnfoldLoad) {
     auto MMOs = extractLoadMMOs(MI.memoperands(), MF);
-    unsigned Alignment = std::max<uint32_t>(TRI.getSpillSize(*RC), 16);
-    bool isAligned = !MMOs.empty() && MMOs.front()->getAlignment() >= Alignment;
-    unsigned Opc = getLoadRegOpcode(Reg, RC, isAligned, Subtarget);
+
+    unsigned Opc;
+    if (FoldedBCast) {
+      Opc = getBroadcastOpcode(I, RC, Subtarget);
+    } else {
+      unsigned Alignment = std::max<uint32_t>(TRI.getSpillSize(*RC), 16);
+      bool isAligned = !MMOs.empty() && MMOs.front()->getAlignment() >= Alignment;
+      Opc = getLoadRegOpcode(Reg, RC, isAligned, Subtarget);
+    }
+
     DebugLoc DL;
     MachineInstrBuilder MIB = BuildMI(MF, DL, get(Opc), Reg);
     for (unsigned i = 0, e = AddrOps.size(); i != e; ++i)
@@ -5459,6 +5525,7 @@ X86InstrInfo::unfoldMemoryOperand(SelectionDAG &DAG, SDNode *N,
   unsigned Index = I->Flags & TB_INDEX_MASK;
   bool FoldedLoad = I->Flags & TB_FOLDED_LOAD;
   bool FoldedStore = I->Flags & TB_FOLDED_STORE;
+  bool FoldedBCast = I->Flags & TB_FOLDED_BCAST;
   const MCInstrDesc &MCID = get(Opc);
   MachineFunction &MF = DAG.getMachineFunction();
   const TargetRegisterInfo &TRI = *MF.getSubtarget().getRegisterInfo();
@@ -5492,10 +5559,17 @@ X86InstrInfo::unfoldMemoryOperand(SelectionDAG &DAG, SDNode *N,
       return false;
     // FIXME: If a VR128 can have size 32, we should be checking if a 32-byte
     // memory access is slow above.
-    unsigned Alignment = std::max<uint32_t>(TRI.getSpillSize(*RC), 16);
-    bool isAligned = !MMOs.empty() && MMOs.front()->getAlignment() >= Alignment;
-    Load = DAG.getMachineNode(getLoadRegOpcode(0, RC, isAligned, Subtarget), dl,
-                              VT, MVT::Other, AddrOps);
+
+    unsigned Opc;
+    if (FoldedBCast) {
+      Opc = getBroadcastOpcode(I, RC, Subtarget);
+    } else {
+      unsigned Alignment = std::max<uint32_t>(TRI.getSpillSize(*RC), 16);
+      bool isAligned = !MMOs.empty() && MMOs.front()->getAlignment() >= Alignment;
+      Opc = getLoadRegOpcode(0, RC, isAligned, Subtarget);
+    }
+
+    Load = DAG.getMachineNode(Opc, dl, VT, MVT::Other, AddrOps);
     NewNodes.push_back(Load);
 
     // Preserve memory reference information.
@@ -7481,7 +7555,12 @@ X86InstrInfo::describeLoadedValue(const MachineInstr &MI) const {
     DIExpression::appendOffset(Ops, Offset);
     Expr = DIExpression::get(MI.getMF()->getFunction().getContext(), Ops);
 
-    return ParamLoadedValue(Op, Expr);;
+    return ParamLoadedValue(*Op, Expr);;
+  }
+  case X86::XOR32rr: {
+    if (MI.getOperand(1).getReg() == MI.getOperand(2).getReg())
+      return ParamLoadedValue(MachineOperand::CreateImm(0), Expr);
+    return None;
   }
   default:
     return TargetInstrInfo::describeLoadedValue(MI);
