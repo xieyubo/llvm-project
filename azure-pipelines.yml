@@ -22,17 +22,6 @@ jobs:
         configuration: Release
         maximumCpuCount: true
         msbuildArchitecture: x64
-    - task: ArchiveFiles@2
-      inputs:
-        rootFolderOrFile: '$(WORKING_DIR)\\Release\\bin\\clang-tidy.exe'
-        includeRootFolder: false
-        archiveType: '7z'
-        archiveFile: '$(WORKING_DIR)\\Release\\bin\\clang-tidy.x86.7z'
-        replaceExistingArchive: true
-    - task: PublishPipelineArtifact@1
-      inputs:
-        targetPath: '$(WORKING_DIR)\\Release\\bin\\clang-tidy.x86.7z'
-        artifactName: 'clang-tidy.x86'
 - job: Build_Windows_X64_Release
   variables:
     WORKING_DIR: 'build.x64'
@@ -51,17 +40,5 @@ jobs:
         vsVersion: 15.0
         platform: x64
         configuration: Release
-        clean: false
         maximumCpuCount: true
         msbuildArchitecture: x64
-    - task: ArchiveFiles@2
-      inputs:
-        rootFolderOrFile: '$(WORKING_DIR)\\Release\\bin\\clang-tidy.exe'
-        includeRootFolder: false
-        archiveType: '7z'
-        archiveFile: '$(WORKING_DIR)\\Release\\bin\\clang-tidy.x64.7z'
-        replaceExistingArchive: true
-    - task: PublishPipelineArtifact@1
-      inputs:
-        targetPath: '$(WORKING_DIR)\\Release\\bin\\clang-tidy.x64.7z'
-        artifactName: 'clang-tidy.x64'
