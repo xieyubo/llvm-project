@@ -7,13 +7,12 @@ variables:
     -DLLVM_ENABLE_PROJECTS=clang;clang-tools-extra
     -DPACKAGE_VENDOR=XYB
     -DPACKAGE_VERSION=$(Build.SourceVersion)
-  BUILD_TIMEOUT_IN_MINUTES: 180
 
 jobs:
 - job: Build_Windows_X86_Release
   variables:
     WORKING_DIR: 'build.x86'
-  timeoutInMinutes: $(BUILD_TIMEOUT_IN_MINUTES)
+  timeoutInMinutes: 180
   pool:
     vmImage: vs2017-win2016
   steps:
@@ -44,7 +43,7 @@ jobs:
 - job: Build_Windows_X64_Release
   variables:
     WORKING_DIR: 'build.x64'
-  timeoutInMinutes: $(BUILD_TIMEOUT_IN_MINUTES)
+  timeoutInMinutes: 180
   pool:
     vmImage: vs2017-win2016
   steps:
