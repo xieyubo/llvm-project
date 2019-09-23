@@ -7496,9 +7496,10 @@ QualType Sema::FindCompositeObjCPointerType(ExprResult &LHS, ExprResult &RHS,
       compositeType = RHSOPT->isObjCBuiltinType() ? RHSTy : LHSTy;
     } else if (Context.canAssignObjCInterfaces(RHSOPT, LHSOPT)) {
       compositeType = LHSOPT->isObjCBuiltinType() ? LHSTy : RHSTy;
-    } else if ((LHSTy->isObjCQualifiedIdType() ||
-                RHSTy->isObjCQualifiedIdType()) &&
-               Context.ObjCQualifiedIdTypesAreCompatible(LHSTy, RHSTy, true)) {
+    } else if ((LHSOPT->isObjCQualifiedIdType() ||
+                RHSOPT->isObjCQualifiedIdType()) &&
+               Context.ObjCQualifiedIdTypesAreCompatible(LHSOPT, RHSOPT,
+                                                         true)) {
       // Need to handle "id<xx>" explicitly.
       // GCC allows qualified id and any Objective-C type to devolve to
       // id. Currently localizing to here until clear this should be
@@ -9190,7 +9191,8 @@ static void DiagnoseDivisionSizeofPointerOrArray(Sema &S, Expr *LHS, Expr *RHS,
     }
   } else if (const auto *ArrayTy = S.Context.getAsArrayType(LHSTy)) {
     QualType ArrayElemTy = ArrayTy->getElementType();
-    if (ArrayElemTy->isDependentType() || RHSTy->isDependentType() ||
+    if (ArrayElemTy != S.Context.getBaseElementType(ArrayTy) ||
+        ArrayElemTy->isDependentType() || RHSTy->isDependentType() ||
         S.Context.getTypeSize(ArrayElemTy) == S.Context.getTypeSize(RHSTy))
       return;
     S.Diag(Loc, diag::warn_division_sizeof_array)

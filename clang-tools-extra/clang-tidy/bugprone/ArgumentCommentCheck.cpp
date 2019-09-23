@@ -372,7 +372,7 @@ void ArgumentCommentCheck::checkCallArgs(ASTContext *Ctx,
           << FixItHint::CreateInsertion(Args[I]->getBeginLoc(), ArgComment);
     }
   }
-} // namespace bugprone
+}
 
 void ArgumentCommentCheck::check(const MatchFinder::MatchResult &Result) {
   const auto *E = Result.Nodes.getNodeAs<Expr>("expr");
