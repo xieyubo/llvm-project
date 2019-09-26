@@ -1558,6 +1558,11 @@ void NamedDecl::printQualifiedName(raw_ostream &OS) const {
 
 void NamedDecl::printQualifiedName(raw_ostream &OS,
                                    const PrintingPolicy &P) const {
+  if (getDeclContext()->isFunctionOrMethod()) {
+    // We do not print '(anonymous)' for function parameters without name.
+    printName(OS);
+    return;
+  }
   printNestedNameSpecifier(OS, P);
   if (getDeclName() || isa<DecompositionDecl>(this))
     OS << *this;
