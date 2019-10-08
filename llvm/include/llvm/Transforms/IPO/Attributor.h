@@ -101,6 +101,7 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/CallGraph.h"
+#include "llvm/Analysis/MustExecute.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/CallSite.h"
 #include "llvm/IR/PassManager.h"
@@ -214,6 +215,16 @@ struct IRPosition {
                                             unsigned ArgNo) {
     return IRPosition::callsite_argument(cast<CallBase>(*ICS.getInstruction()),
                                          ArgNo);
+  }
+
+  /// Create a position describing the argument of \p ACS at position \p ArgNo.
+  static const IRPosition callsite_argument(AbstractCallSite ACS,
+                                            unsigned ArgNo) {
+    int CSArgNo = ACS.getCallArgOperandNo(ArgNo);
+    if (CSArgNo >= 0)
+      return IRPosition::callsite_argument(
+          cast<CallBase>(*ACS.getInstruction()), CSArgNo);
+    return IRPosition();
   }
 
   /// Create a position with function scope matching the "context" of \p IRP.
@@ -398,8 +409,6 @@ struct IRPosition {
 
     assert(KindOrArgNo < 0 &&
            "Expected (call site) arguments to never reach this point!");
-    assert(!isa<Argument>(getAnchorValue()) &&
-           "Expected arguments to have an associated argument position!");
     return Kind(KindOrArgNo);
   }
 
@@ -587,7 +596,7 @@ private:
 /// instance down in the abstract attributes.
 struct InformationCache {
   InformationCache(const Module &M, AnalysisGetter &AG)
-      : DL(M.getDataLayout()), AG(AG) {
+      : DL(M.getDataLayout()), Explorer(/* ExploreInterBlock */ true), AG(AG) {
 
     CallGraph *CG = AG.getAnalysis<CallGraphAnalysis>(M);
     if (!CG)
@@ -616,6 +625,11 @@ struct InformationCache {
   /// Return the instructions in \p F that may read or write memory.
   InstructionVectorTy &getReadOrWriteInstsForFunction(const Function &F) {
     return FuncRWInstsMap[&F];
+  }
+
+  /// Return MustBeExecutedContextExplorer
+  MustBeExecutedContextExplorer &getMustBeExecutedContextExplorer() {
+    return Explorer;
   }
 
   /// Return TargetLibraryInfo for function \p F.
@@ -654,6 +668,9 @@ private:
 
   /// The datalayout used in the module.
   const DataLayout &DL;
+
+  /// MustBeExecutedContextExplorer
+  MustBeExecutedContextExplorer Explorer;
 
   /// Getters for analysis.
   AnalysisGetter &AG;
@@ -802,8 +819,8 @@ struct Attributor {
   /// This will trigger the identification and initialization of attributes for
   /// \p F.
   void markLiveInternalFunction(const Function &F) {
-    assert(F.hasInternalLinkage() &&
-           "Only internal linkage is assumed dead initially.");
+    assert(F.hasLocalLinkage() &&
+           "Only local linkage is assumed dead initially.");
 
     identifyDefaultAbstractAttributes(const_cast<Function &>(F));
   }
@@ -827,7 +844,7 @@ struct Attributor {
   /// This method will evaluate \p Pred on call sites and return
   /// true if \p Pred holds in every call sites. However, this is only possible
   /// all call sites are known, hence the function has internal linkage.
-  bool checkForAllCallSites(const function_ref<bool(CallSite)> &Pred,
+  bool checkForAllCallSites(const function_ref<bool(AbstractCallSite)> &Pred,
                             const AbstractAttribute &QueryingAA,
                             bool RequireAllCallSites);
 
@@ -1704,6 +1721,11 @@ struct AADereferenceable
   /// Return true if we assume that the underlying value is nonnull.
   bool isAssumedNonNull() const {
     return NonNullAA && NonNullAA->isAssumedNonNull();
+  }
+
+  /// Return true if we know that the underlying value is nonnull.
+  bool isKnownNonNull() const {
+    return NonNullAA && NonNullAA->isKnownNonNull();
   }
 
   /// Return true if we assume that underlying value is
