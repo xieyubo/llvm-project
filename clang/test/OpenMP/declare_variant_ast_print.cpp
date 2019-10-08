@@ -1,6 +1,6 @@
-// RUN: %clang_cc1 -verify -fopenmp -x c++ -std=c++14 -fexceptions -fcxx-exceptions %s -ast-print -o - -Wno-source-uses-openmp | FileCheck %s
+// RUN: %clang_cc1 -verify -fopenmp -x c++ -std=c++14 -fexceptions -fcxx-exceptions %s -ast-print -o - -Wno-source-uses-openmp -Wno-openmp-clauses | FileCheck %s
 
-// RUN: %clang_cc1 -verify -fopenmp-simd -x c++ -std=c++14 -fexceptions -fcxx-exceptions %s -ast-print -o - -Wno-source-uses-openmp | FileCheck %s
+// RUN: %clang_cc1 -verify -fopenmp-simd -x c++ -std=c++14 -fexceptions -fcxx-exceptions %s -ast-print -o - -Wno-source-uses-openmp -Wno-openmp-clauses | FileCheck %s
 
 // expected-no-diagnostics
 
@@ -23,13 +23,12 @@ T foofoo() { return T(); }
 // CHECK-NEXT: int bar();
 #pragma omp declare variant(foofoo <int>) match(xxx = {})
 #pragma omp declare variant(foofoo <int>) match(xxx = {vvv})
-#pragma omp declare variant(foofoo <int>) match(implementation={vendor(llvm)})
+#pragma omp declare variant(foofoo <int>) match(implementation={vendor(llvm), xxx})
 #pragma omp declare variant(foofoo <int>) match(implementation={vendor(unknown)})
 #pragma omp declare variant(foofoo <int>) match(implementation={vendor(score(5): ibm)})
 int bar();
 
-// CHECK:      #pragma omp declare variant(foofoo<T>) match(implementation={vendor(score(C + 5):ibm)})
-// CHECK:      #pragma omp declare variant(foofoo<T>) match(implementation={vendor(score(C + 5):xxx)})
+// CHECK:      #pragma omp declare variant(foofoo<T>) match(implementation={vendor(score(C + 5):ibm, xxx)})
 // CHECK-NEXT: #pragma omp declare variant(foofoo<T>) match(implementation={vendor(unknown)})
 // CHECK-NEXT: #pragma omp declare variant(foofoo<T>) match(implementation={vendor(llvm)})
 // CHECK-NEXT: template <typename T, int C> T barbar();
@@ -45,8 +44,7 @@ int bar();
 template <typename T, int C>
 T barbar();
 
-// CHECK:      #pragma omp declare variant(foofoo<int>) match(implementation={vendor(score(3 + 5):ibm)})
-// CHECK:      #pragma omp declare variant(foofoo<int>) match(implementation={vendor(score(3 + 5):xxx)})
+// CHECK:      #pragma omp declare variant(foofoo<int>) match(implementation={vendor(score(3 + 5):ibm, xxx)})
 // CHECK-NEXT: #pragma omp declare variant(foofoo<int>) match(implementation={vendor(unknown)})
 // CHECK-NEXT: #pragma omp declare variant(foofoo<int>) match(implementation={vendor(llvm)})
 // CHECK-NEXT: template<> int barbar<int, 3>();
