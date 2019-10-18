@@ -1697,18 +1697,23 @@ llvm::Value *CGOpenMPRuntime::getThreadID(CodeGenFunction &CGF,
       return ThreadID;
   }
   // If exceptions are enabled, do not use parameter to avoid possible crash.
-  if (!CGF.EHStack.requiresLandingPad() || !CGF.getLangOpts().Exceptions ||
-      !CGF.getLangOpts().CXXExceptions ||
-      CGF.Builder.GetInsertBlock() == CGF.AllocaInsertPt->getParent()) {
-    if (auto *OMPRegionInfo =
-            dyn_cast_or_null<CGOpenMPRegionInfo>(CGF.CapturedStmtInfo)) {
-      if (OMPRegionInfo->getThreadIDVariable()) {
-        // Check if this an outlined function with thread id passed as argument.
-        LValue LVal = OMPRegionInfo->getThreadIDVariableLValue(CGF);
+  if (auto *OMPRegionInfo =
+          dyn_cast_or_null<CGOpenMPRegionInfo>(CGF.CapturedStmtInfo)) {
+    if (OMPRegionInfo->getThreadIDVariable()) {
+      // Check if this an outlined function with thread id passed as argument.
+      LValue LVal = OMPRegionInfo->getThreadIDVariableLValue(CGF);
+      llvm::BasicBlock *TopBlock = CGF.AllocaInsertPt->getParent();
+      if (!CGF.EHStack.requiresLandingPad() || !CGF.getLangOpts().Exceptions ||
+          !CGF.getLangOpts().CXXExceptions ||
+          CGF.Builder.GetInsertBlock() == TopBlock ||
+          !isa<llvm::Instruction>(LVal.getPointer()) ||
+          cast<llvm::Instruction>(LVal.getPointer())->getParent() == TopBlock ||
+          cast<llvm::Instruction>(LVal.getPointer())->getParent() ==
+              CGF.Builder.GetInsertBlock()) {
         ThreadID = CGF.EmitLoadOfScalar(LVal, Loc);
         // If value loaded in entry block, cache it and use it everywhere in
         // function.
-        if (CGF.Builder.GetInsertBlock() == CGF.AllocaInsertPt->getParent()) {
+        if (CGF.Builder.GetInsertBlock() == TopBlock) {
           auto &Elem = OpenMPLocThreadIDMap.FindAndConstruct(CGF.CurFn);
           Elem.second.ThreadID = ThreadID;
         }
@@ -6701,6 +6706,7 @@ emitNumTeamsForTargetDirective(CodeGenFunction &CGF,
   case OMPD_taskloop:
   case OMPD_taskloop_simd:
   case OMPD_master_taskloop:
+  case OMPD_master_taskloop_simd:
   case OMPD_parallel_master_taskloop:
   case OMPD_requires:
   case OMPD_unknown:
@@ -7009,6 +7015,7 @@ emitNumThreadsForTargetDirective(CodeGenFunction &CGF,
   case OMPD_taskloop:
   case OMPD_taskloop_simd:
   case OMPD_master_taskloop:
+  case OMPD_master_taskloop_simd:
   case OMPD_parallel_master_taskloop:
   case OMPD_requires:
   case OMPD_unknown:
@@ -8782,6 +8789,7 @@ getNestedDistributeDirective(ASTContext &Ctx, const OMPExecutableDirective &D) {
     case OMPD_taskloop:
     case OMPD_taskloop_simd:
     case OMPD_master_taskloop:
+    case OMPD_master_taskloop_simd:
     case OMPD_parallel_master_taskloop:
     case OMPD_requires:
     case OMPD_unknown:
@@ -9541,6 +9549,7 @@ void CGOpenMPRuntime::scanForTargetRegionsFunctions(const Stmt *S,
     case OMPD_taskloop:
     case OMPD_taskloop_simd:
     case OMPD_master_taskloop:
+    case OMPD_master_taskloop_simd:
     case OMPD_parallel_master_taskloop:
     case OMPD_requires:
     case OMPD_unknown:
@@ -10158,6 +10167,7 @@ void CGOpenMPRuntime::emitTargetDataStandAloneCall(
     case OMPD_taskloop:
     case OMPD_taskloop_simd:
     case OMPD_master_taskloop:
+    case OMPD_master_taskloop_simd:
     case OMPD_parallel_master_taskloop:
     case OMPD_target:
     case OMPD_target_simd:
