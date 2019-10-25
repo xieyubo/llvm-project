@@ -33026,6 +33026,9 @@ static SDValue combineX86ShufflesRecursively(
     ArrayRef<int> RootMask, ArrayRef<const SDNode *> SrcNodes, unsigned Depth,
     bool HasVariableMask, bool AllowVariableMask, SelectionDAG &DAG,
     const X86Subtarget &Subtarget) {
+  assert(RootMask.size() > 0 && (RootMask.size() > 1 || RootMask[0] == 0) &&
+         "Illegal shuffle root mask");
+
   // Bound the depth of our recursive combine because this is ultimately
   // quadratic in nature.
   const unsigned MaxRecursionDepth = 8;
@@ -36262,6 +36265,10 @@ static SDValue scalarizeExtEltFP(SDNode *ExtElt, SelectionDAG &DAG) {
 static SDValue combineReductionToHorizontal(SDNode *ExtElt, SelectionDAG &DAG,
                                             const X86Subtarget &Subtarget) {
   assert(ExtElt->getOpcode() == ISD::EXTRACT_VECTOR_ELT && "Unexpected caller");
+
+  // We need at least SSE2 to anything here.
+  if (!Subtarget.hasSSE2())
+    return SDValue();
 
   ISD::NodeType Opc;
   SDValue Rdx =
