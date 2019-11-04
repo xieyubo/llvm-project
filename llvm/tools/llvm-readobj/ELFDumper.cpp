@@ -299,9 +299,10 @@ public:
   Elf_Relr_Range dyn_relrs() const;
   std::string getFullSymbolName(const Elf_Sym *Symbol, StringRef StrTable,
                                 bool IsDynamic) const;
-  void getSectionNameIndex(const Elf_Sym *Symbol, const Elf_Sym *FirstSym,
-                           StringRef &SectionName,
-                           unsigned &SectionIndex) const;
+  Expected<unsigned> getSymbolSectionIndex(const Elf_Sym *Symbol,
+                                           const Elf_Sym *FirstSym) const;
+  Expected<StringRef> getSymbolSectionName(const Elf_Sym *Symbol,
+                                           unsigned SectionIndex) const;
   Expected<std::string> getStaticSymbolName(uint32_t Index) const;
   std::string getDynamicString(uint64_t Value) const;
   StringRef getSymbolVersionByIndex(StringRef StrTab,
@@ -432,6 +433,8 @@ public:
   virtual void printMipsABIFlags(const ELFObjectFile<ELFT> *Obj) = 0;
   const ELFDumper<ELFT> *dumper() const { return Dumper; }
 
+  void reportUniqueWarning(Error Err) const;
+
 protected:
   std::function<Error(const Twine &Msg)> WarningHandler;
   StringRef FileName;
@@ -555,6 +558,14 @@ private:
   void printSectionMapping(const ELFO *Obj);
 };
 
+template <class ELFT>
+void DumpStyle<ELFT>::reportUniqueWarning(Error Err) const {
+  handleAllErrors(std::move(Err), [&](const ErrorInfoBase &EI) {
+    cantFail(WarningHandler(EI.message()),
+             "WarningHandler should always return ErrorSuccess");
+  });
+}
+
 template <typename ELFT> class LLVMStyle : public DumpStyle<ELFT> {
 public:
   TYPEDEF_ELF_TYPES(ELFT)
@@ -595,6 +606,7 @@ private:
   void printDynamicRelocation(const ELFO *Obj, Elf_Rela Rel);
   void printSymbols(const ELFO *Obj);
   void printDynamicSymbols(const ELFO *Obj);
+  void printSymbolSection(const Elf_Sym *Symbol, const Elf_Sym *First);
   void printSymbol(const ELFO *Obj, const Elf_Sym *Symbol, const Elf_Sym *First,
                    StringRef StrTable, bool IsDynamic,
                    bool /*NonVisibilityBitsUsed*/) override;
@@ -820,12 +832,20 @@ std::string ELFDumper<ELFT>::getFullSymbolName(const Elf_Sym *Symbol,
       unwrapOrError(ObjF->getFileName(), Symbol->getName(StrTable)));
 
   if (SymbolName.empty() && Symbol->getType() == ELF::STT_SECTION) {
-    unsigned SectionIndex;
-    StringRef SectionName;
     Elf_Sym_Range Syms = unwrapOrError(
         ObjF->getFileName(), ObjF->getELFFile()->symbols(DotSymtabSec));
-    getSectionNameIndex(Symbol, Syms.begin(), SectionName, SectionIndex);
-    return SectionName;
+    Expected<unsigned> SectionIndex =
+        getSymbolSectionIndex(Symbol, Syms.begin());
+    if (!SectionIndex) {
+      ELFDumperStyle->reportUniqueWarning(SectionIndex.takeError());
+      return "<?>";
+    }
+    Expected<StringRef> NameOrErr = getSymbolSectionName(Symbol, *SectionIndex);
+    if (!NameOrErr) {
+      ELFDumperStyle->reportUniqueWarning(NameOrErr.takeError());
+      return ("<section " + Twine(*SectionIndex) + ">").str();
+    }
+    return *NameOrErr;
   }
 
   if (!IsDynamic)
@@ -841,33 +861,43 @@ std::string ELFDumper<ELFT>::getFullSymbolName(const Elf_Sym *Symbol,
 }
 
 template <typename ELFT>
-void ELFDumper<ELFT>::getSectionNameIndex(const Elf_Sym *Symbol,
-                                          const Elf_Sym *FirstSym,
-                                          StringRef &SectionName,
-                                          unsigned &SectionIndex) const {
-  SectionIndex = Symbol->st_shndx;
+Expected<unsigned>
+ELFDumper<ELFT>::getSymbolSectionIndex(const Elf_Sym *Symbol,
+                                       const Elf_Sym *FirstSym) const {
+  return Symbol->st_shndx == SHN_XINDEX
+             ? object::getExtendedSymbolTableIndex<ELFT>(Symbol, FirstSym,
+                                                         ShndxTable)
+             : Symbol->st_shndx;
+}
+
+// If the Symbol has a reserved st_shndx other than SHN_XINDEX, return a
+// descriptive interpretation of the st_shndx value. Otherwise, return the name
+// of the section with index SectionIndex. This function assumes that if the
+// Symbol has st_shndx == SHN_XINDEX the SectionIndex will be the value derived
+// from the SHT_SYMTAB_SHNDX section.
+template <typename ELFT>
+Expected<StringRef>
+ELFDumper<ELFT>::getSymbolSectionName(const Elf_Sym *Symbol,
+                                      unsigned SectionIndex) const {
   if (Symbol->isUndefined())
-    SectionName = "Undefined";
-  else if (Symbol->isProcessorSpecific())
-    SectionName = "Processor Specific";
-  else if (Symbol->isOSSpecific())
-    SectionName = "Operating System Specific";
-  else if (Symbol->isAbsolute())
-    SectionName = "Absolute";
-  else if (Symbol->isCommon())
-    SectionName = "Common";
-  else if (Symbol->isReserved() && SectionIndex != SHN_XINDEX)
-    SectionName = "Reserved";
-  else {
-    if (SectionIndex == SHN_XINDEX)
-      SectionIndex = unwrapOrError(ObjF->getFileName(),
-                                   object::getExtendedSymbolTableIndex<ELFT>(
-                                       Symbol, FirstSym, ShndxTable));
-    const ELFFile<ELFT> *Obj = ObjF->getELFFile();
-    const typename ELFT::Shdr *Sec =
-        unwrapOrError(ObjF->getFileName(), Obj->getSection(SectionIndex));
-    SectionName = unwrapOrError(ObjF->getFileName(), Obj->getSectionName(Sec));
-  }
+    return "Undefined";
+  if (Symbol->isProcessorSpecific())
+    return "Processor Specific";
+  if (Symbol->isOSSpecific())
+    return "Operating System Specific";
+  if (Symbol->isAbsolute())
+    return "Absolute";
+  if (Symbol->isCommon())
+    return "Common";
+  if (Symbol->isReserved() && Symbol->st_shndx != SHN_XINDEX)
+    return "Reserved";
+
+  const ELFFile<ELFT> *Obj = ObjF->getELFFile();
+  Expected<const Elf_Shdr *> SecOrErr =
+      Obj->getSection(SectionIndex);
+  if (!SecOrErr)
+    return SecOrErr.takeError();
+  return Obj->getSectionName(*SecOrErr);
 }
 
 template <class ELFO>
@@ -3286,12 +3316,18 @@ std::string GNUStyle<ELFT>::getSymbolSectionNdx(const ELFO *Obj,
     return "ABS";
   case ELF::SHN_COMMON:
     return "COM";
-  case ELF::SHN_XINDEX:
-    return to_string(format_decimal(
-        unwrapOrError(this->FileName,
-                      object::getExtendedSymbolTableIndex<ELFT>(
-                          Symbol, FirstSym, this->dumper()->getShndxTable())),
-        3));
+  case ELF::SHN_XINDEX: {
+    Expected<uint32_t> IndexOrErr = object::getExtendedSymbolTableIndex<ELFT>(
+        Symbol, FirstSym, this->dumper()->getShndxTable());
+    if (!IndexOrErr) {
+      assert(Symbol->st_shndx == SHN_XINDEX &&
+             "getSymbolSectionIndex should only fail due to an invalid "
+             "SHT_SYMTAB_SHNDX table/reference");
+      this->reportUniqueWarning(IndexOrErr.takeError());
+      return "RSV[0xffff]";
+    }
+    return to_string(format_decimal(*IndexOrErr, 3));
+  }
   default:
     // Find if:
     // Processor specific
@@ -5440,13 +5476,34 @@ void LLVMStyle<ELFT>::printSectionHeaders(const ELFO *Obj) {
 }
 
 template <class ELFT>
+void LLVMStyle<ELFT>::printSymbolSection(const Elf_Sym *Symbol,
+                                         const Elf_Sym *First) {
+  Expected<unsigned> SectionIndex =
+      this->dumper()->getSymbolSectionIndex(Symbol, First);
+  if (!SectionIndex) {
+    assert(Symbol->st_shndx == SHN_XINDEX &&
+           "getSymbolSectionIndex should only fail due to an invalid "
+           "SHT_SYMTAB_SHNDX table/reference");
+    this->reportUniqueWarning(SectionIndex.takeError());
+    W.printHex("Section", "Reserved", SHN_XINDEX);
+    return;
+  }
+
+  Expected<StringRef> SectionName =
+      this->dumper()->getSymbolSectionName(Symbol, *SectionIndex);
+  if (!SectionName) {
+    this->reportUniqueWarning(SectionName.takeError());
+    W.printHex("Section", "<?>", *SectionIndex);
+  } else {
+    W.printHex("Section", *SectionName, *SectionIndex);
+  }
+}
+
+template <class ELFT>
 void LLVMStyle<ELFT>::printSymbol(const ELFO *Obj, const Elf_Sym *Symbol,
                                   const Elf_Sym *First, StringRef StrTable,
                                   bool IsDynamic,
                                   bool /*NonVisibilityBitsUsed*/) {
-  unsigned SectionIndex = 0;
-  StringRef SectionName;
-  this->dumper()->getSectionNameIndex(Symbol, First, SectionName, SectionIndex);
   std::string FullSymbolName =
       this->dumper()->getFullSymbolName(Symbol, StrTable, IsDynamic);
   unsigned char SymbolType = Symbol->getType();
@@ -5483,7 +5540,7 @@ void LLVMStyle<ELFT>::printSymbol(const ELFO *Obj, const Elf_Sym *Symbol,
     }
     W.printFlags("Other", Symbol->st_other, makeArrayRef(SymOtherFlags), 0x3u);
   }
-  W.printHex("Section", SectionName, SectionIndex);
+  printSymbolSection(Symbol, First);
 }
 
 template <class ELFT>
@@ -6036,13 +6093,7 @@ void LLVMStyle<ELFT>::printMipsGOT(const MipsGOTParser<ELFT> &Parser) {
       const Elf_Sym *Sym = Parser.getGotSym(&E);
       W.printHex("Value", Sym->st_value);
       W.printEnum("Type", Sym->getType(), makeArrayRef(ElfSymbolTypes));
-
-      unsigned SectionIndex = 0;
-      StringRef SectionName;
-      this->dumper()->getSectionNameIndex(
-          Sym, this->dumper()->dynamic_symbols().begin(), SectionName,
-          SectionIndex);
-      W.printHex("Section", SectionName, SectionIndex);
+      printSymbolSection(Sym, this->dumper()->dynamic_symbols().begin());
 
       std::string SymName = this->dumper()->getFullSymbolName(
           Sym, this->dumper()->getDynamicStringTable(), true);
@@ -6086,13 +6137,7 @@ void LLVMStyle<ELFT>::printMipsPLT(const MipsGOTParser<ELFT> &Parser) {
       const Elf_Sym *Sym = Parser.getPltSym(&E);
       W.printHex("Value", Sym->st_value);
       W.printEnum("Type", Sym->getType(), makeArrayRef(ElfSymbolTypes));
-
-      unsigned SectionIndex = 0;
-      StringRef SectionName;
-      this->dumper()->getSectionNameIndex(
-          Sym, this->dumper()->dynamic_symbols().begin(), SectionName,
-          SectionIndex);
-      W.printHex("Section", SectionName, SectionIndex);
+      printSymbolSection(Sym, this->dumper()->dynamic_symbols().begin());
 
       std::string SymName =
           this->dumper()->getFullSymbolName(Sym, Parser.getPltStrTable(), true);
