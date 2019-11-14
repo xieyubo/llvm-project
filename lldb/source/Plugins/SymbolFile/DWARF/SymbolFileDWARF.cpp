@@ -830,6 +830,8 @@ lldb::LanguageType SymbolFileDWARF::ParseLanguage(CompileUnit &comp_unit) {
 }
 
 size_t SymbolFileDWARF::ParseFunctions(CompileUnit &comp_unit) {
+  static Timer::Category func_cat(LLVM_PRETTY_FUNCTION);
+  Timer scoped_timer(func_cat, "SymbolFileDWARF::ParseFunctions");
   std::lock_guard<std::recursive_mutex> guard(GetModuleMutex());
   DWARFUnit *dwarf_cu = GetDWARFCompileUnit(&comp_unit);
   if (!dwarf_cu)
@@ -837,7 +839,8 @@ size_t SymbolFileDWARF::ParseFunctions(CompileUnit &comp_unit) {
 
   size_t functions_added = 0;
   std::vector<DWARFDIE> function_dies;
-  dwarf_cu->AppendDIEsWithTag(DW_TAG_subprogram, function_dies);
+  dwarf_cu->GetNonSkeletonUnit().AppendDIEsWithTag(DW_TAG_subprogram,
+                                                    function_dies);
   for (const DWARFDIE &die : function_dies) {
     if (comp_unit.FindFunctionByUID(die.GetID()))
       continue;
@@ -1509,7 +1512,7 @@ bool SymbolFileDWARF::GetFunction(const DWARFDIE &die, SymbolContext &sc) {
   return false;
 }
 
-lldb::ModuleSP SymbolFileDWARF::GetDWOModule(ConstString name) {
+lldb::ModuleSP SymbolFileDWARF::GetExternalModule(ConstString name) {
   UpdateExternalModuleListIfNeeded();
   const auto &pos = m_external_type_modules.find(name);
   if (pos != m_external_type_modules.end())
@@ -2366,11 +2369,9 @@ void SymbolFileDWARF::FindTypes(
     llvm::DenseSet<lldb_private::SymbolFile *> &searched_symbol_files,
     TypeMap &types) {
   std::lock_guard<std::recursive_mutex> guard(GetModuleMutex());
-  // Make sure we haven't already searched this SymbolFile before...
-  if (searched_symbol_files.count(this))
+  // Make sure we haven't already searched this SymbolFile before.
+  if (!searched_symbol_files.insert(this).second)
     return;
-
-  searched_symbol_files.insert(this);
 
   DWARFDebugInfo *info = DebugInfo();
   if (!info)
@@ -2453,8 +2454,13 @@ void SymbolFileDWARF::FindTypes(
   }
 }
 
-void SymbolFileDWARF::FindTypes(llvm::ArrayRef<CompilerContext> pattern,
-                                  LanguageSet languages, TypeMap &types) {
+void SymbolFileDWARF::FindTypes(
+    llvm::ArrayRef<CompilerContext> pattern, LanguageSet languages,
+    llvm::DenseSet<SymbolFile *> &searched_symbol_files, TypeMap &types) {
+  // Make sure we haven't already searched this SymbolFile before.
+  if (!searched_symbol_files.insert(this).second)
+    return;
+
   std::lock_guard<std::recursive_mutex> guard(GetModuleMutex());
   if (pattern.empty())
     return;

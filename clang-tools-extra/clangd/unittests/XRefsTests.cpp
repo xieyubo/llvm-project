@@ -981,6 +981,19 @@ void foo())cpp";
          HI.NamespaceScope = "";
          HI.Value = "3";
        }},
+      {R"cpp(
+        enum Color { RED, GREEN, };
+        Color x = [[GR^EEN]];
+       )cpp",
+       [](HoverInfo &HI) {
+         HI.Name = "GREEN";
+         HI.NamespaceScope = "";
+         HI.LocalScope = "Color::";
+         HI.Definition = "GREEN";
+         HI.Kind = SymbolKind::EnumMember;
+         HI.Type = "enum Color";
+         HI.Value = "1";
+       }},
       // FIXME: We should use the Decl referenced, even if it comes from an
       // implicit instantiation.
       {R"cpp(
@@ -2161,9 +2174,10 @@ TEST(FindReferences, NeedsIndex) {
 TEST(FindReferences, NoQueryForLocalSymbols) {
   struct RecordingIndex : public MemIndex {
     mutable Optional<llvm::DenseSet<SymbolID>> RefIDs;
-    void refs(const RefsRequest &Req,
+    bool refs(const RefsRequest &Req,
               llvm::function_ref<void(const Ref &)>) const override {
       RefIDs = Req.IDs;
+      return false;
     }
   };
 
