@@ -25,7 +25,9 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/Analysis/BlockFrequencyInfo.h"
 #include "llvm/Analysis/EHPersonalities.h"
+#include "llvm/Analysis/ProfileSummaryInfo.h"
 #include "llvm/CodeGen/IntrinsicLowering.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -609,6 +611,13 @@ X86TargetLowering::X86TargetLowering(const X86TargetMachine &TM,
       addLegalFPImmediate(APFloat(+0.0)); // xorpd
   }
 
+  // FIXME: Mark these legal to prevent them from being expanded to a
+  // libcall in LegalizeDAG. They'll be mutated by X86ISelDAGToDAG::Select.
+  setOperationAction(ISD::STRICT_FADD, MVT::f32, Legal);
+  setOperationAction(ISD::STRICT_FADD, MVT::f64, Legal);
+  setOperationAction(ISD::STRICT_FSUB, MVT::f32, Legal);
+  setOperationAction(ISD::STRICT_FSUB, MVT::f64, Legal);
+
   // We don't support FMA.
   setOperationAction(ISD::FMA, MVT::f64, Expand);
   setOperationAction(ISD::FMA, MVT::f32, Expand);
@@ -657,22 +666,32 @@ X86TargetLowering::X86TargetLowering(const X86TargetMachine &TM,
 
     addLegalFPImmediate(APFloat::getZero(APFloat::IEEEquad())); // xorps
 
-    setOperationAction(ISD::FADD, MVT::f128, Custom);
-    setOperationAction(ISD::FSUB, MVT::f128, Custom);
-    setOperationAction(ISD::FDIV, MVT::f128, Custom);
-    setOperationAction(ISD::FMUL, MVT::f128, Custom);
-    setOperationAction(ISD::FMA,  MVT::f128, Expand);
+    setOperationAction(ISD::FADD,        MVT::f128, LibCall);
+    setOperationAction(ISD::STRICT_FADD, MVT::f128, LibCall);
+    setOperationAction(ISD::FSUB,        MVT::f128, LibCall);
+    setOperationAction(ISD::STRICT_FSUB, MVT::f128, LibCall);
+    setOperationAction(ISD::FDIV,        MVT::f128, LibCall);
+    setOperationAction(ISD::STRICT_FDIV, MVT::f128, LibCall);
+    setOperationAction(ISD::FMUL,        MVT::f128, LibCall);
+    setOperationAction(ISD::STRICT_FMUL, MVT::f128, LibCall);
+    setOperationAction(ISD::FMA,         MVT::f128, LibCall);
+    setOperationAction(ISD::STRICT_FMA,  MVT::f128, LibCall);
 
     setOperationAction(ISD::FABS, MVT::f128, Custom);
     setOperationAction(ISD::FNEG, MVT::f128, Custom);
     setOperationAction(ISD::FCOPYSIGN, MVT::f128, Custom);
 
-    setOperationAction(ISD::FSIN,    MVT::f128, Expand);
-    setOperationAction(ISD::FCOS,    MVT::f128, Expand);
-    setOperationAction(ISD::FSINCOS, MVT::f128, Expand);
-    setOperationAction(ISD::FSQRT,   MVT::f128, Expand);
+    setOperationAction(ISD::FSIN,         MVT::f128, LibCall);
+    setOperationAction(ISD::STRICT_FSIN,  MVT::f128, LibCall);
+    setOperationAction(ISD::FCOS,         MVT::f128, LibCall);
+    setOperationAction(ISD::STRICT_FCOS,  MVT::f128, LibCall);
+    setOperationAction(ISD::FSINCOS,      MVT::f128, LibCall);
+    // No STRICT_FSINCOS
+    setOperationAction(ISD::FSQRT,        MVT::f128, LibCall);
+    setOperationAction(ISD::STRICT_FSQRT, MVT::f128, LibCall);
 
-    setOperationAction(ISD::FP_EXTEND, MVT::f128, Custom);
+    setOperationAction(ISD::FP_EXTEND,        MVT::f128, Custom);
+    setOperationAction(ISD::STRICT_FP_EXTEND, MVT::f128, Custom);
     // We need to custom handle any FP_ROUND with an f128 input, but
     // LegalizeDAG uses the result type to know when to run a custom handler.
     // So we have to list all legal floating point result types here.
@@ -815,8 +834,12 @@ X86TargetLowering::X86TargetLowering(const X86TargetMachine &TM,
     setOperationAction(ISD::STORE,              MVT::v2f32, Custom);
 
     // FIXME: Currently mutated to non-strict form in X86ISelDAGToDAG::Select,
-    // but its sufficient to pretend their Legal since they will be someday.
+    // but its sufficient to pretend they're Legal since they will be someday.
     setOperationAction(ISD::STRICT_FP_ROUND,    MVT::v4f32, Legal);
+    setOperationAction(ISD::STRICT_FADD,        MVT::v4f32, Legal);
+    setOperationAction(ISD::STRICT_FADD,        MVT::v2f64, Legal);
+    setOperationAction(ISD::STRICT_FSUB,        MVT::v4f32, Legal);
+    setOperationAction(ISD::STRICT_FSUB,        MVT::v2f64, Legal);
   }
 
   if (!Subtarget.useSoftFloat() && Subtarget.hasSSE2()) {
@@ -1107,8 +1130,12 @@ X86TargetLowering::X86TargetLowering(const X86TargetMachine &TM,
     setOperationAction(ISD::SINT_TO_FP,         MVT::v8i32, Legal);
 
     // FIXME: Currently mutated to non-strict form in X86ISelDAGToDAG::Select,
-    // but its sufficient to pretend their Legal since they will be someday.
+    // but its sufficient to pretend they're Legal since they will be someday.
     setOperationAction(ISD::STRICT_FP_ROUND,    MVT::v8f32, Legal);
+    setOperationAction(ISD::STRICT_FADD,        MVT::v8f32, Legal);
+    setOperationAction(ISD::STRICT_FADD,        MVT::v4f64, Legal);
+    setOperationAction(ISD::STRICT_FSUB,        MVT::v8f32, Legal);
+    setOperationAction(ISD::STRICT_FSUB,        MVT::v4f64, Legal);
 
     if (!Subtarget.hasAVX512())
       setOperationAction(ISD::BITCAST, MVT::v32i1, Custom);
@@ -1373,7 +1400,11 @@ X86TargetLowering::X86TargetLowering(const X86TargetMachine &TM,
 
     // FIXME: Currently mutated to non-strict form in X86ISelDAGToDAG::Select,
     // but its sufficient to pretend their Legal since they will be someday.
-    setOperationAction(ISD::STRICT_FP_ROUND,    MVT::v16f32, Legal);
+    setOperationAction(ISD::STRICT_FP_ROUND, MVT::v16f32, Legal);
+    setOperationAction(ISD::STRICT_FADD,     MVT::v16f32, Legal);
+    setOperationAction(ISD::STRICT_FADD,     MVT::v8f64, Legal);
+    setOperationAction(ISD::STRICT_FSUB,     MVT::v16f32, Legal);
+    setOperationAction(ISD::STRICT_FSUB,     MVT::v8f64, Legal);
 
     setTruncStoreAction(MVT::v8i64,   MVT::v8i8,   Legal);
     setTruncStoreAction(MVT::v8i64,   MVT::v8i16,  Legal);
@@ -8397,7 +8428,7 @@ static SDValue lowerBuildVectorAsBroadcast(BuildVectorSDNode *BVOp,
   // TODO: If multiple splats are generated to load the same constant,
   // it may be detrimental to overall size. There needs to be a way to detect
   // that condition to know if this is truly a size win.
-  bool OptForSize = DAG.getMachineFunction().getFunction().hasOptSize();
+  bool OptForSize = DAG.shouldOptForSize();
 
   // Handle broadcasting a single constant scalar from the constant pool
   // into a vector.
@@ -10221,18 +10252,29 @@ static bool isNoopShuffleMask(ArrayRef<int> Mask) {
   return true;
 }
 
-/// Test whether there are elements crossing 128-bit lanes in this
+/// Test whether there are elements crossing LaneSizeInBits lanes in this
 /// shuffle mask.
 ///
 /// X86 divides up its shuffles into in-lane and cross-lane shuffle operations
 /// and we routinely test for these.
-static bool is128BitLaneCrossingShuffleMask(MVT VT, ArrayRef<int> Mask) {
-  int LaneSize = 128 / VT.getScalarSizeInBits();
+static bool isLaneCrossingShuffleMask(unsigned LaneSizeInBits,
+                                      unsigned ScalarSizeInBits,
+                                      ArrayRef<int> Mask) {
+  assert(LaneSizeInBits && ScalarSizeInBits &&
+         (LaneSizeInBits % ScalarSizeInBits) == 0 &&
+         "Illegal shuffle lane size");
+  int LaneSize = LaneSizeInBits / ScalarSizeInBits;
   int Size = Mask.size();
   for (int i = 0; i < Size; ++i)
     if (Mask[i] >= 0 && (Mask[i] % Size) / LaneSize != i / LaneSize)
       return true;
   return false;
+}
+
+/// Test whether there are elements crossing 128-bit lanes in this
+/// shuffle mask.
+static bool is128BitLaneCrossingShuffleMask(MVT VT, ArrayRef<int> Mask) {
+  return isLaneCrossingShuffleMask(128, VT.getScalarSizeInBits(), Mask);
 }
 
 /// Test whether a shuffle mask is equivalent within each sub-lane.
@@ -11174,7 +11216,7 @@ static SDValue lowerShuffleAsBlend(const SDLoc &DL, MVT VT, SDValue V1,
   case MVT::v32i16:
   case MVT::v64i8: {
     // Attempt to lower to a bitmask if we can. Only if not optimizing for size.
-    bool OptForSize = DAG.getMachineFunction().getFunction().hasOptSize();
+    bool OptForSize = DAG.shouldOptForSize();
     if (!OptForSize) {
       if (SDValue Masked = lowerShuffleAsBitMask(DL, VT, V1, V2, Mask, Zeroable,
                                                  Subtarget, DAG))
@@ -18315,7 +18357,7 @@ static SDValue LowerFunnelShift(SDValue Op, const X86Subtarget &Subtarget,
          "Unexpected funnel shift type!");
 
   // Expand slow SHLD/SHRD cases if we are not optimizing for size.
-  bool OptForSize = DAG.getMachineFunction().getFunction().hasOptSize();
+  bool OptForSize = DAG.shouldOptForSize();
   if (!OptForSize && Subtarget.isSHLDSlow())
     return SDValue();
 
@@ -18547,7 +18589,7 @@ SDValue X86TargetLowering::BuildFILD(SDValue Op, EVT SrcVT, SDValue Chain,
 /// implementation, and likely shuffle complexity of the alternate sequence.
 static bool shouldUseHorizontalOp(bool IsSingleSource, SelectionDAG &DAG,
                                   const X86Subtarget &Subtarget) {
-  bool IsOptimizingSize = DAG.getMachineFunction().getFunction().hasOptSize();
+  bool IsOptimizingSize = DAG.shouldOptForSize();
   bool HasFastHOps = Subtarget.hasFastHorizontalOps();
   return !IsSingleSource || IsOptimizingSize || HasFastHOps;
 }
@@ -19673,9 +19715,11 @@ SDValue X86TargetLowering::LowerFP_TO_INT(SDValue Op, SelectionDAG &DAG) const {
 }
 
 SDValue X86TargetLowering::LowerFP_EXTEND(SDValue Op, SelectionDAG &DAG) const {
+  bool IsStrict = Op->isStrictFPOpcode();
+
   SDLoc DL(Op);
   MVT VT = Op.getSimpleValueType();
-  SDValue In = Op.getOperand(0);
+  SDValue In = Op.getOperand(IsStrict ? 1 : 0);
   MVT SVT = In.getSimpleValueType();
 
   if (VT == MVT::f128) {
@@ -19684,6 +19728,8 @@ SDValue X86TargetLowering::LowerFP_EXTEND(SDValue Op, SelectionDAG &DAG) const {
   }
 
   assert(SVT == MVT::v2f32 && "Only customize MVT::v2f32 type legalization!");
+  // FIXME: Strict fp.
+  assert(!IsStrict && "Strict FP not supported yet!");
 
   return DAG.getNode(X86ISD::VFPEXT, DL, VT,
                      DAG.getNode(ISD::CONCAT_VECTORS, DL, MVT::v4f32,
@@ -19691,8 +19737,10 @@ SDValue X86TargetLowering::LowerFP_EXTEND(SDValue Op, SelectionDAG &DAG) const {
 }
 
 SDValue X86TargetLowering::LowerFP_ROUND(SDValue Op, SelectionDAG &DAG) const {
+  bool IsStrict = Op->isStrictFPOpcode();
+
   MVT VT = Op.getSimpleValueType();
-  SDValue In = Op.getOperand(0);
+  SDValue In = Op.getOperand(IsStrict ? 1 : 0);
   MVT SVT = In.getSimpleValueType();
 
   // It's legal except when f128 is involved
@@ -19704,17 +19752,17 @@ SDValue X86TargetLowering::LowerFP_ROUND(SDValue Op, SelectionDAG &DAG) const {
   // FP_ROUND node has a second operand indicating whether it is known to be
   // precise. That doesn't take part in the LibCall so we can't directly use
   // LowerF128Call.
-  MakeLibCallOptions CallOptions;
-  return makeLibCall(DAG, LC, VT, In, CallOptions, SDLoc(Op)).first;
-}
 
-// FIXME: This is a hack to allow FP_ROUND to be marked Custom without breaking
-// the default expansion of STRICT_FP_ROUND.
-static SDValue LowerSTRICT_FP_ROUND(SDValue Op, SelectionDAG &DAG) {
-  // FIXME: Need to form a libcall with an input chain for f128.
-  assert(Op.getOperand(0).getValueType() != MVT::f128 &&
-         "Don't know how to handle f128 yet!");
-  return Op;
+  SDLoc dl(Op);
+  SDValue Chain = IsStrict ? Op.getOperand(0) : SDValue();
+  MakeLibCallOptions CallOptions;
+  std::pair<SDValue, SDValue> Tmp = makeLibCall(DAG, LC, VT, In, CallOptions,
+                                                dl, Chain);
+
+  if (IsStrict)
+    return DAG.getMergeValues({ Tmp.first, Tmp.second }, dl);
+
+  return Tmp.first;
 }
 
 /// Depending on uarch and/or optimizing for size, we might prefer to use a
@@ -19792,12 +19840,6 @@ static SDValue lowerAddSubToHorizontalOp(SDValue Op, SelectionDAG &DAG,
 /// Depending on uarch and/or optimizing for size, we might prefer to use a
 /// vector operation in place of the typical scalar operation.
 SDValue X86TargetLowering::lowerFaddFsub(SDValue Op, SelectionDAG &DAG) const {
-  if (Op.getValueType() == MVT::f128) {
-    RTLIB::Libcall LC = Op.getOpcode() == ISD::FADD ? RTLIB::ADD_F128
-                                                    : RTLIB::SUB_F128;
-    return LowerF128Call(Op, DAG, LC);
-  }
-
   assert((Op.getValueType() == MVT::f32 || Op.getValueType() == MVT::f64) &&
          "Only expecting float/double");
   return lowerAddSubToHorizontalOp(Op, DAG, Subtarget);
@@ -20479,7 +20521,7 @@ static SDValue LowerAndToBT(SDValue And, ISD::CondCode CC,
     } else {
       // Use BT if the immediate can't be encoded in a TEST instruction or we
       // are optimizing for size and the immedaite won't fit in a byte.
-      bool OptForSize = DAG.getMachineFunction().getFunction().hasOptSize();
+      bool OptForSize = DAG.shouldOptForSize();
       if ((!isUInt<32>(AndRHSVal) || (OptForSize && !isUInt<8>(AndRHSVal))) &&
           isPowerOf2_64(AndRHSVal)) {
         Src = AndLHS;
@@ -24063,7 +24105,7 @@ static SDValue LowerINTRINSIC_W_CHAIN(SDValue Op, const X86Subtarget &Subtarget,
       MFI.setHasCopyImplyingStackAdjustment(true);
       // Don't do anything here, we will expand these intrinsics out later
       // during FinalizeISel in EmitInstrWithCustomInserter.
-      return SDValue();
+      return Op;
     }
     case Intrinsic::x86_lwpins32:
     case Intrinsic::x86_lwpins64:
@@ -27738,9 +27780,21 @@ SDValue X86TargetLowering::LowerGC_TRANSITION_END(SDValue Op,
 
 SDValue X86TargetLowering::LowerF128Call(SDValue Op, SelectionDAG &DAG,
                                          RTLIB::Libcall Call) const {
-  SmallVector<SDValue, 2> Ops(Op->op_begin(), Op->op_end());
+
+  bool IsStrict = Op->isStrictFPOpcode();
+  unsigned Offset = IsStrict ? 1 : 0;
+  SmallVector<SDValue, 2> Ops(Op->op_begin() + Offset, Op->op_end());
+
+  SDLoc dl(Op);
+  SDValue Chain = IsStrict ? Op.getOperand(0) : SDValue();
   MakeLibCallOptions CallOptions;
-  return makeLibCall(DAG, Call, MVT::f128, Ops, CallOptions, SDLoc(Op)).first;
+  std::pair<SDValue, SDValue> Tmp = makeLibCall(DAG, Call, MVT::f128, Ops,
+                                                CallOptions, dl, Chain);
+
+  if (IsStrict)
+    return DAG.getMergeValues({ Tmp.first, Tmp.second }, dl);
+
+  return Tmp.first;
 }
 
 /// Provide custom lowering hooks for some operations.
@@ -27790,15 +27844,14 @@ SDValue X86TargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const {
   case ISD::STRICT_FP_TO_SINT:
   case ISD::FP_TO_UINT:
   case ISD::STRICT_FP_TO_UINT:  return LowerFP_TO_INT(Op, DAG);
-  case ISD::FP_EXTEND:          return LowerFP_EXTEND(Op, DAG);
-  case ISD::FP_ROUND:           return LowerFP_ROUND(Op, DAG);
-  case ISD::STRICT_FP_ROUND:    return LowerSTRICT_FP_ROUND(Op, DAG);
+  case ISD::FP_EXTEND:
+  case ISD::STRICT_FP_EXTEND:   return LowerFP_EXTEND(Op, DAG);
+  case ISD::FP_ROUND:
+  case ISD::STRICT_FP_ROUND:    return LowerFP_ROUND(Op, DAG);
   case ISD::LOAD:               return LowerLoad(Op, Subtarget, DAG);
   case ISD::STORE:              return LowerStore(Op, Subtarget, DAG);
   case ISD::FADD:
   case ISD::FSUB:               return lowerFaddFsub(Op, DAG);
-  case ISD::FMUL:               return LowerF128Call(Op, DAG, RTLIB::MUL_F128);
-  case ISD::FDIV:               return LowerF128Call(Op, DAG, RTLIB::DIV_F128);
   case ISD::FABS:
   case ISD::FNEG:               return LowerFABSorFNEG(Op, DAG);
   case ISD::FCOPYSIGN:          return LowerFCOPYSIGN(Op, DAG);
@@ -39653,7 +39706,7 @@ static SDValue combineOrShiftToFunnelShift(SDNode *N, SelectionDAG &DAG,
     return SDValue();
 
   // fold (or (x << c) | (y >> (64 - c))) ==> (shld64 x, y, c)
-  bool OptForSize = DAG.getMachineFunction().getFunction().hasOptSize();
+  bool OptForSize = DAG.shouldOptForSize();
   unsigned Bits = VT.getScalarSizeInBits();
 
   // SHLD/SHRD instructions have lower register pressure, but on some

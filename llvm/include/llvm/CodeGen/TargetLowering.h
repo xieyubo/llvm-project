@@ -231,6 +231,11 @@ public:
   TargetLoweringBase &operator=(const TargetLoweringBase &) = delete;
   virtual ~TargetLoweringBase() = default;
 
+  /// Return true if the target support strict float operation
+  bool isStrictFPEnabled() const {
+    return IsStrictFPEnabled;
+  }
+
 protected:
   /// Initialize all of the actions to default values.
   void initActions();
@@ -2909,6 +2914,8 @@ protected:
   /// details.
   MachineBasicBlock *emitXRayTypedEvent(MachineInstr &MI,
                                         MachineBasicBlock *MBB) const;
+
+  bool IsStrictFPEnabled;
 };
 
 /// This class defines information used to lower LLVM code to legal SelectionDAG
@@ -3006,12 +3013,8 @@ public:
   std::pair<SDValue, SDValue> makeLibCall(SelectionDAG &DAG, RTLIB::Libcall LC,
                                           EVT RetVT, ArrayRef<SDValue> Ops,
                                           MakeLibCallOptions CallOptions,
-                                          const SDLoc &dl) const;
-
-  std::pair<SDValue, SDValue> ExpandChainLibCall(SelectionDAG &DAG,
-                                                 RTLIB::Libcall LC,
-                                                 SDNode *Node,
-                                                 bool isSigned) const;
+                                          const SDLoc &dl,
+                                          SDValue Chain = SDValue()) const;
 
   /// Check whether parameters to a call that are passed in callee saved
   /// registers are the same as from the calling function.  This needs to be
