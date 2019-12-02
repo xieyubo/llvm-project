@@ -28,25 +28,101 @@ foreach n = [ 2, 4 ] in {
                               "Intrinsic::arm_mve_vld"#n#"q":$IRIntr)>;
 }
 
+multiclass bit_op_fp<IRBuilder bitop> {
+def "": Intrinsic<Vector, (args Vector:$a, Vector:$b),
+   (bitcast (bitop (bitcast $a, UVector), (bitcast $b, UVector)), Vector)>;
+}
+
+multiclass bit_op_fp_with_inv<IRBuilder bitop> {
+def "": Intrinsic<Vector, (args Vector:$a, Vector:$b),
+   (bitcast (bitop (bitcast $a, UVector), (not (bitcast $b, UVector))), Vector)>;
+}
+
 let params = T.Int in {
 def vaddq: Intrinsic<Vector, (args Vector:$a, Vector:$b), (add $a, $b)>;
+def vandq: Intrinsic<Vector, (args Vector:$a, Vector:$b), (and $a, $b)>;
+def vbicq: Intrinsic<Vector, (args Vector:$a, Vector:$b), (and $a, (not $b))>;
+def veorq: Intrinsic<Vector, (args Vector:$a, Vector:$b), (xor $a, $b)>;
+def vornq: Intrinsic<Vector, (args Vector:$a, Vector:$b), (or $a, (not $b))>;
+def vorrq: Intrinsic<Vector, (args Vector:$a, Vector:$b), (or $a, $b)>;
 def vsubq: Intrinsic<Vector, (args Vector:$a, Vector:$b), (sub $a, $b)>;
+def vmulq: Intrinsic<Vector, (args Vector:$a, Vector:$b), (mul $a, $b)>;
 }
 
 let params = T.Float in {
 def vaddqf: Intrinsic<Vector, (args Vector:$a, Vector:$b), (fadd $a, $b)>,
             NameOverride<"vaddq">;
+defm vandqf: bit_op_fp<and>, NameOverride<"vandq">;
+defm vbicqf: bit_op_fp_with_inv<and>, NameOverride<"vbicq">;
+defm veorqf: bit_op_fp<xor>, NameOverride<"veorq">;
+defm vornqf: bit_op_fp_with_inv<or>, NameOverride<"vornq">;
+defm vorrqf: bit_op_fp<or>, NameOverride<"vorrq">;
 def vsubqf: Intrinsic<Vector, (args Vector:$a, Vector:$b), (fsub $a, $b)>,
             NameOverride<"vsubq">;
+def vmulqf: Intrinsic<Vector, (args Vector:$a, Vector:$b), (fmul $a, $b)>,
+            NameOverride<"vmulq">;
 }
 
+// The bitcasting below is not overcomplicating the IR because while
+// Vector and UVector may be different vector types at the C level i.e.
+// vectors of same size signed/unsigned ints. Once they're lowered
+// to IR, they are just bit vectors with no sign at all, so the
+// bitcasts will be automatically elided by IRBuilder.
+multiclass predicated_bit_op_fp<string int_op> {
+def "": Intrinsic<Vector, (args Vector:$inactive, Vector:$a, Vector:$b,
+                                Predicate:$pred),
+    (bitcast (IRInt<int_op, [UVector, Predicate]>
+                    (bitcast $a, UVector),
+                    (bitcast $b, UVector),
+                    $pred,
+                    (bitcast $inactive, UVector)), Vector)>;
+}
+
+// Plain intrinsics
 let params = T.Usual in {
+def vabdq: Intrinsic<Vector, (args Vector:$a, Vector:$b),
+                             (IRInt<"vabd", [Vector]> $a, $b)>;
+}
+
+// Predicated intrinsics
+let params = T.Usual in {
+def vabdq_m: Intrinsic<
+    Vector, (args Vector:$inactive, Vector:$a, Vector:$b, Predicate:$pred),
+    (IRInt<"abd_predicated", [Vector, Predicate]> $a, $b, $pred, $inactive)>;
 def vaddq_m: Intrinsic<
     Vector, (args Vector:$inactive, Vector:$a, Vector:$b, Predicate:$pred),
     (IRInt<"add_predicated", [Vector, Predicate]> $a, $b, $pred, $inactive)>;
 def vsubq_m: Intrinsic<
     Vector, (args Vector:$inactive, Vector:$a, Vector:$b, Predicate:$pred),
     (IRInt<"sub_predicated", [Vector, Predicate]> $a, $b, $pred, $inactive)>;
+def vmulq_m: Intrinsic<
+    Vector, (args Vector:$inactive, Vector:$a, Vector:$b, Predicate:$pred),
+    (IRInt<"mul_predicated", [Vector, Predicate]> $a, $b, $pred, $inactive)>;
+defm vandq_m: predicated_bit_op_fp<"and_predicated">;
+defm vbicq_m: predicated_bit_op_fp<"bic_predicated">;
+defm veorq_m: predicated_bit_op_fp<"eor_predicated">;
+defm vornq_m: predicated_bit_op_fp<"orn_predicated">;
+defm vorrq_m: predicated_bit_op_fp<"orr_predicated">;
+}
+
+// Predicated intrinsics - Int types only
+let params = T.Int in {
+def vminq_m: Intrinsic<
+    Vector, (args Vector:$inactive, Vector:$a, Vector:$b, Predicate:$pred),
+    (IRInt<"min_predicated", [Vector, Predicate]> $a, $b, $pred, $inactive)>;
+def vmaxq_m: Intrinsic<
+    Vector, (args Vector:$inactive, Vector:$a, Vector:$b, Predicate:$pred),
+    (IRInt<"max_predicated", [Vector, Predicate]> $a, $b, $pred, $inactive)>;
+}
+
+// Predicated intrinsics - Float types only
+let params = T.Float in {
+def vminnmq_m: Intrinsic<
+    Vector, (args Vector:$inactive, Vector:$a, Vector:$b, Predicate:$pred),
+    (IRInt<"min_predicated", [Vector, Predicate]> $a, $b, $pred, $inactive)>;
+def vmaxnmq_m: Intrinsic<
+    Vector, (args Vector:$inactive, Vector:$a, Vector:$b, Predicate:$pred),
+    (IRInt<"max_predicated", [Vector, Predicate]> $a, $b, $pred, $inactive)>;
 }
 
 let params = T.Int in {
@@ -116,6 +192,28 @@ let params = T.Float in {
   defm: compare<"lt", fcmp_lt>;
   defm: compare<"le", fcmp_le>;
 }
+
+let params = T.Signed in {
+  def vminq: Intrinsic<Vector, (args Vector:$a, Vector:$b),
+                               (select (icmp_sle $a, $b), $a, $b)>;
+  def vmaxq: Intrinsic<Vector, (args Vector:$a, Vector:$b),
+                               (select (icmp_sge $a, $b), $a, $b)>;
+}
+let params = T.Unsigned in {
+  def vminqu: Intrinsic<Vector, (args Vector:$a, Vector:$b),
+                                (select (icmp_ule $a, $b), $a, $b)>,
+              NameOverride<"vminq">;
+  def vmaxqu: Intrinsic<Vector, (args Vector:$a, Vector:$b),
+                                (select (icmp_uge $a, $b), $a, $b)>,
+              NameOverride<"vmaxq">;
+}
+let params = T.Float in {
+  def vminnmq: Intrinsic<Vector, (args Vector:$a, Vector:$b),
+                               (IRIntBase<"minnum", [Vector]> $a, $b)>;
+  def vmaxnmq: Intrinsic<Vector, (args Vector:$a, Vector:$b),
+                               (IRIntBase<"maxnum", [Vector]> $a, $b)>;
+}
+
 
 multiclass contiguous_load<string mnemonic, PrimitiveType memtype,
                            list<Type> same_size, list<Type> wider> {

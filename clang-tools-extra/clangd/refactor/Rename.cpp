@@ -123,20 +123,26 @@ llvm::Optional<ReasonToReject> renameable(const Decl &RenameDecl,
   if (RenameDecl.getParentFunctionOrMethod())
     return None;
 
+  // Check whether the symbol being rename is indexable.
+  auto &ASTCtx = RenameDecl.getASTContext();
+  bool MainFileIsHeader = isHeaderFile(MainFilePath, ASTCtx.getLangOpts());
+  bool DeclaredInMainFile =
+      isInsideMainFile(RenameDecl.getBeginLoc(), ASTCtx.getSourceManager());
+  bool IsMainFileOnly = true;
+  if (MainFileIsHeader)
+    // main file is a header, the symbol can't be main file only.
+    IsMainFileOnly = false;
+  else if (!DeclaredInMainFile)
+    IsMainFileOnly = false;
   bool IsIndexable =
       isa<NamedDecl>(RenameDecl) &&
       SymbolCollector::shouldCollectSymbol(
           cast<NamedDecl>(RenameDecl), RenameDecl.getASTContext(),
-          SymbolCollector::Options(), CrossFile);
+          SymbolCollector::Options(), IsMainFileOnly);
   if (!IsIndexable) // If the symbol is not indexable, we disallow rename.
     return ReasonToReject::NonIndexable;
 
   if (!CrossFile) {
-    auto &ASTCtx = RenameDecl.getASTContext();
-    const auto &SM = ASTCtx.getSourceManager();
-    bool MainFileIsHeader = isHeaderFile(MainFilePath, ASTCtx.getLangOpts());
-    bool DeclaredInMainFile = isInsideMainFile(RenameDecl.getBeginLoc(), SM);
-
     if (!DeclaredInMainFile)
       // We are sure the symbol is used externally, bail out early.
       return ReasonToReject::UsedOutsideFile;
@@ -186,7 +192,7 @@ llvm::Error makeError(ReasonToReject Reason) {
     case ReasonToReject::NoSymbolFound:
       return "there is no symbol at the given location";
     case ReasonToReject::NoIndexProvided:
-      return "symbol may be used in other files (no index available)";
+      return "no index provided";
     case ReasonToReject::UsedOutsideFile:
       return "the symbol is used outside main file";
     case ReasonToReject::NonIndexable:
@@ -281,20 +287,37 @@ Range toRange(const SymbolLocation &L) {
 
 // Return all rename occurrences (per the index) outside of the main file,
 // grouped by the absolute file path.
-llvm::StringMap<std::vector<Range>>
+llvm::Expected<llvm::StringMap<std::vector<Range>>>
 findOccurrencesOutsideFile(const NamedDecl &RenameDecl,
                            llvm::StringRef MainFile, const SymbolIndex &Index) {
   RefsRequest RQuest;
   RQuest.IDs.insert(*getSymbolID(&RenameDecl));
 
-  // Absolute file path => rename ocurrences in that file.
+  // Absolute file path => rename occurrences in that file.
   llvm::StringMap<std::vector<Range>> AffectedFiles;
-  Index.refs(RQuest, [&](const Ref &R) {
+  // FIXME: make the limit customizable.
+  static constexpr size_t MaxLimitFiles = 50;
+  bool HasMore = Index.refs(RQuest, [&](const Ref &R) {
+    if (AffectedFiles.size() > MaxLimitFiles)
+      return;
     if (auto RefFilePath = filePath(R.Location, /*HintFilePath=*/MainFile)) {
       if (*RefFilePath != MainFile)
         AffectedFiles[*RefFilePath].push_back(toRange(R.Location));
     }
   });
+
+  if (AffectedFiles.size() > MaxLimitFiles)
+    return llvm::make_error<llvm::StringError>(
+        llvm::formatv("The number of affected files exceeds the max limit {0}",
+                      MaxLimitFiles),
+        llvm::inconvertibleErrorCode());
+  if (HasMore) {
+    return llvm::make_error<llvm::StringError>(
+        llvm::formatv("The symbol {0} has too many occurrences",
+                      RenameDecl.getQualifiedNameAsString()),
+        llvm::inconvertibleErrorCode());
+  }
+
   return AffectedFiles;
 }
 
@@ -321,17 +344,10 @@ llvm::Expected<FileEdits> renameOutsideFile(
     llvm::function_ref<llvm::Expected<std::string>(PathRef)> GetFileContent) {
   auto AffectedFiles =
       findOccurrencesOutsideFile(RenameDecl, MainFilePath, Index);
-  // FIXME: make the limit customizable.
-  static constexpr size_t MaxLimitFiles = 50;
-  if (AffectedFiles.size() >= MaxLimitFiles)
-    return llvm::make_error<llvm::StringError>(
-        llvm::formatv(
-            "The number of affected files exceeds the max limit {0}: {1}",
-            MaxLimitFiles, AffectedFiles.size()),
-        llvm::inconvertibleErrorCode());
-
+  if (!AffectedFiles)
+    return AffectedFiles.takeError();
   FileEdits Results;
-  for (auto &FileAndOccurrences : AffectedFiles) {
+  for (auto &FileAndOccurrences : *AffectedFiles) {
     llvm::StringRef FilePath = FileAndOccurrences.first();
 
     auto AffectedFileCode = GetFileContent(FilePath);
@@ -339,8 +355,9 @@ llvm::Expected<FileEdits> renameOutsideFile(
       elog("Fail to read file content: {0}", AffectedFileCode.takeError());
       continue;
     }
-    auto RenameEdit = buildRenameEdit(
-        *AffectedFileCode, std::move(FileAndOccurrences.second), NewName);
+    auto RenameEdit =
+        buildRenameEdit(FilePath, *AffectedFileCode,
+                        std::move(FileAndOccurrences.second), NewName);
     if (!RenameEdit) {
       return llvm::make_error<llvm::StringError>(
           llvm::formatv("fail to build rename edit for file {0}: {1}", FilePath,
@@ -441,7 +458,8 @@ llvm::Expected<FileEdits> rename(const RenameInputs &RInputs) {
   return Results;
 }
 
-llvm::Expected<Edit> buildRenameEdit(llvm::StringRef InitialCode,
+llvm::Expected<Edit> buildRenameEdit(llvm::StringRef AbsFilePath,
+                                     llvm::StringRef InitialCode,
                                      std::vector<Range> Occurrences,
                                      llvm::StringRef NewName) {
   llvm::sort(Occurrences);
@@ -481,7 +499,7 @@ llvm::Expected<Edit> buildRenameEdit(llvm::StringRef InitialCode,
   for (const auto &R : OccurrencesOffsets) {
     auto ByteLength = R.second - R.first;
     if (auto Err = RenameEdit.add(
-            tooling::Replacement(InitialCode, R.first, ByteLength, NewName)))
+            tooling::Replacement(AbsFilePath, R.first, ByteLength, NewName)))
       return std::move(Err);
   }
   return Edit(InitialCode, std::move(RenameEdit));

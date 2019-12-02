@@ -450,12 +450,19 @@ TEST(RenameTest, Renameable) {
       )cpp",
        "used outside main file", HeaderFile, Index},
 
-      {R"cpp(// disallow -- symbol is not indexable.
+      {R"cpp(// disallow -- symbol in annonymous namespace in header is not indexable.
         namespace {
         class Unin^dexable {};
         }
       )cpp",
        "not eligible for indexing", HeaderFile, Index},
+
+      {R"cpp(// allow -- symbol in annonymous namespace in non-header file is indexable.
+        namespace {
+        class [[F^oo]] {};
+        }
+      )cpp",
+       nullptr, !HeaderFile, Index},
 
       {R"cpp(// disallow -- namespace symbol isn't supported
         namespace n^s {}
@@ -621,6 +628,34 @@ TEST(RenameTests, CrossFile) {
       UnorderedElementsAre(
           Pair(Eq(BarPath), Eq(expectedResult(BarCode, NewName))),
           Pair(Eq(MainFilePath), Eq(expectedResult(MainCode, NewName)))));
+
+  // Run rename on a pagination index which couldn't return all refs in one
+  // request, we reject rename on this case.
+  class PaginationIndex : public SymbolIndex {
+    bool refs(const RefsRequest &Req,
+              llvm::function_ref<void(const Ref &)> Callback) const override {
+      return true; // has more references
+    }
+
+    bool fuzzyFind(
+        const FuzzyFindRequest &Req,
+        llvm::function_ref<void(const Symbol &)> Callback) const override {
+      return false;
+    }
+    void
+    lookup(const LookupRequest &Req,
+           llvm::function_ref<void(const Symbol &)> Callback) const override {}
+
+    void relations(const RelationsRequest &Req,
+                   llvm::function_ref<void(const SymbolID &, const Symbol &)>
+                       Callback) const override {}
+    size_t estimateMemoryUsage() const override { return 0; }
+  } PIndex;
+  Results = rename({MainCode.point(), NewName, AST, MainFilePath, &PIndex,
+                    /*CrossFile=*/true, GetDirtyBuffer});
+  EXPECT_FALSE(Results);
+  EXPECT_THAT(llvm::toString(Results.takeError()),
+              testing::HasSubstr("too many occurrences"));
 }
 
 TEST(CrossFileRenameTests, CrossFileOnLocalSymbol) {
@@ -641,14 +676,16 @@ TEST(CrossFileRenameTests, CrossFileOnLocalSymbol) {
 TEST(CrossFileRenameTests, BuildRenameEdits) {
   Annotations Code("[[😂]]");
   auto LSPRange = Code.range();
-  auto Edit = buildRenameEdit(Code.code(), {LSPRange}, "abc");
+  llvm::StringRef FilePath = "/test/TestTU.cpp";
+  auto Edit = buildRenameEdit(FilePath, Code.code(), {LSPRange}, "abc");
   ASSERT_TRUE(bool(Edit)) << Edit.takeError();
   ASSERT_EQ(1UL, Edit->Replacements.size());
+  EXPECT_EQ(FilePath, Edit->Replacements.begin()->getFilePath());
   EXPECT_EQ(4UL, Edit->Replacements.begin()->getLength());
 
   // Test invalid range.
   LSPRange.end = {10, 0}; // out of range
-  Edit = buildRenameEdit(Code.code(), {LSPRange}, "abc");
+  Edit = buildRenameEdit(FilePath, Code.code(), {LSPRange}, "abc");
   EXPECT_FALSE(Edit);
   EXPECT_THAT(llvm::toString(Edit.takeError()),
               testing::HasSubstr("fail to convert"));
@@ -659,7 +696,7 @@ TEST(CrossFileRenameTests, BuildRenameEdits) {
               [[range]]
       [[range]]
   )cpp");
-  Edit = buildRenameEdit(T.code(), T.ranges(), "abc");
+  Edit = buildRenameEdit(FilePath, T.code(), T.ranges(), "abc");
   ASSERT_TRUE(bool(Edit)) << Edit.takeError();
   EXPECT_EQ(applyEdits(FileEdits{{T.code(), std::move(*Edit)}}).front().second,
             expectedResult(Code, expectedResult(T, "abc")));
