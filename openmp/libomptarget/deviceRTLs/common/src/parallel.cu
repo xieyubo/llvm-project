@@ -1,4 +1,4 @@
-//===---- parallel.cu - NVPTX OpenMP parallel implementation ----- CUDA -*-===//
+//===---- parallel.cu - GPU OpenMP parallel implementation ------- CUDA -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -32,7 +32,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "omptarget-nvptx.h"
+#include "common/omptarget.h"
 #include "target_impl.h"
 
 typedef struct ConvergentSimdJob {
