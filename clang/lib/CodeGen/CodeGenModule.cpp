@@ -957,7 +957,7 @@ static void AppendTargetMangling(const CodeGenModule &CGM,
 
   Out << '.';
   const TargetInfo &Target = CGM.getTarget();
-  TargetAttr::ParsedTargetAttr Info =
+  ParsedTargetAttr Info =
       Attr->parse([&Target](StringRef LHS, StringRef RHS) {
         // Multiversioning doesn't allow "no-${feature}", so we can
         // only have "+" prefixes here.
@@ -1678,7 +1678,7 @@ bool CodeGenModule::GetCPUAndFeaturesAttributes(GlobalDecl GD,
     // get and parse the target attribute so we can get the cpu for
     // the function.
     if (TD) {
-      TargetAttr::ParsedTargetAttr ParsedAttr = TD->parse();
+      ParsedTargetAttr ParsedAttr = TD->parse();
       if (ParsedAttr.Architecture != "" &&
           getTarget().isValidCPUName(ParsedAttr.Architecture))
         TargetCPU = ParsedAttr.Architecture;
@@ -2212,9 +2212,15 @@ llvm::Constant *CodeGenModule::EmitAnnotateAttr(llvm::GlobalValue *GV,
                  *UnitGV = EmitAnnotationUnit(L),
                  *LineNoCst = EmitAnnotationLineNo(L);
 
+  llvm::Constant *ASZeroGV = GV;
+  if (GV->getAddressSpace() != 0) {
+    ASZeroGV = llvm::ConstantExpr::getAddrSpaceCast(
+                   GV, GV->getValueType()->getPointerTo(0));
+  }
+
   // Create the ConstantStruct for the global annotation.
   llvm::Constant *Fields[4] = {
-    llvm::ConstantExpr::getBitCast(GV, Int8PtrTy),
+    llvm::ConstantExpr::getBitCast(ASZeroGV, Int8PtrTy),
     llvm::ConstantExpr::getBitCast(AnnoGV, Int8PtrTy),
     llvm::ConstantExpr::getBitCast(UnitGV, Int8PtrTy),
     LineNoCst
@@ -3715,6 +3721,10 @@ void CodeGenModule::EmitTentativeDefinition(const VarDecl *D) {
   EmitGlobalVarDefinition(D);
 }
 
+void CodeGenModule::EmitExternalDeclaration(const VarDecl *D) {
+  EmitExternalVarDeclaration(D);
+}
+
 CharUnits CodeGenModule::GetTargetTypeStoreSize(llvm::Type *Ty) const {
   return Context.toCharUnitsFromBits(
       getDataLayout().getTypeStoreSizeInBits(Ty));
@@ -4096,6 +4106,19 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D,
   if (CGDebugInfo *DI = getModuleDebugInfo())
     if (getCodeGenOpts().getDebugInfo() >= codegenoptions::LimitedDebugInfo)
       DI->EmitGlobalVariable(GV, D);
+}
+
+void CodeGenModule::EmitExternalVarDeclaration(const VarDecl *D) {
+  if (CGDebugInfo *DI = getModuleDebugInfo())
+    if (getCodeGenOpts().getDebugInfo() >= codegenoptions::LimitedDebugInfo) {
+      QualType ASTTy = D->getType();
+      llvm::Type *Ty = getTypes().ConvertTypeForMem(D->getType());
+      llvm::PointerType *PTy =
+          llvm::PointerType::get(Ty, getContext().getTargetAddressSpace(ASTTy));
+      llvm::Constant *GV = GetOrCreateLLVMGlobal(D->getName(), PTy, D);
+      DI->EmitExternalVariable(
+          cast<llvm::GlobalVariable>(GV->stripPointerCasts()), D);
+    }
 }
 
 static bool isVarDeclStrongDefinition(const ASTContext &Context,
@@ -5858,9 +5881,9 @@ void CodeGenModule::AddVTableTypeMetadata(llvm::GlobalVariable *VTable,
   }
 }
 
-TargetAttr::ParsedTargetAttr CodeGenModule::filterFunctionTargetAttrs(const TargetAttr *TD) {
+ParsedTargetAttr CodeGenModule::filterFunctionTargetAttrs(const TargetAttr *TD) {
   assert(TD != nullptr);
-  TargetAttr::ParsedTargetAttr ParsedAttr = TD->parse();
+  ParsedTargetAttr ParsedAttr = TD->parse();
 
   ParsedAttr.Features.erase(
       llvm::remove_if(ParsedAttr.Features,
@@ -5880,7 +5903,7 @@ void CodeGenModule::getFunctionFeatureMap(llvm::StringMap<bool> &FeatureMap,
   StringRef TargetCPU = Target.getTargetOpts().CPU;
   const FunctionDecl *FD = GD.getDecl()->getAsFunction();
   if (const auto *TD = FD->getAttr<TargetAttr>()) {
-    TargetAttr::ParsedTargetAttr ParsedAttr = filterFunctionTargetAttrs(TD);
+    ParsedTargetAttr ParsedAttr = filterFunctionTargetAttrs(TD);
 
     // Make a copy of the features as passed on the command line into the
     // beginning of the additional features from the function to override.
