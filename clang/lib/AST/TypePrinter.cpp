@@ -1555,6 +1555,9 @@ void TypePrinter::printAttributedAfter(const AttributedType *T,
   case attr::NoDeref:
     OS << "noderef";
     break;
+  case attr::AcquireHandle:
+    OS << "acquire_handle";
+    break;
   }
   OS << "))";
 }
@@ -1781,7 +1784,7 @@ std::string Qualifiers::getAddrSpaceAsString(LangAS AS) {
   case LangAS::opencl_local:
     return "__local";
   case LangAS::opencl_private:
-    return "";
+    return "__private";
   case LangAS::opencl_constant:
     return "__constant";
   case LangAS::opencl_generic:

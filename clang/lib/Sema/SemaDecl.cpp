@@ -2685,6 +2685,10 @@ static void checkNewAttributesAfterDef(Sema &S, Decl *New, const Decl *Old) {
       // C's _Noreturn is allowed to be added to a function after it is defined.
       ++I;
       continue;
+    } else if (isa<UuidAttr>(NewAttribute)) {
+      // msvc will allow a subsequent definition to add an uuid to a class
+      ++I;
+      continue;
     } else if (const AlignedAttr *AA = dyn_cast<AlignedAttr>(NewAttribute)) {
       if (AA->isAlignas()) {
         // C++11 [dcl.align]p6:
@@ -5025,6 +5029,8 @@ Decl *Sema::BuildAnonymousStructOrUnion(Scope *S, DeclSpec &DS,
         /*BitWidth=*/nullptr, /*Mutable=*/false,
         /*InitStyle=*/ICIS_NoInit);
     Anon->setAccess(AS);
+    ProcessDeclAttributes(S, Anon, Dc);
+
     if (getLangOpts().CPlusPlus)
       FieldCollector->Add(cast<FieldDecl>(Anon));
   } else {
@@ -5038,6 +5044,7 @@ Decl *Sema::BuildAnonymousStructOrUnion(Scope *S, DeclSpec &DS,
       SC = SC_None;
     }
 
+    assert(DS.getAttributes().empty() && "No attribute expected");
     Anon = VarDecl::Create(Context, Owner, DS.getBeginLoc(),
                            Record->getLocation(), /*IdentifierInfo=*/nullptr,
                            Context.getTypeDeclType(Record), TInfo, SC);
@@ -8378,7 +8385,7 @@ static bool isOpenCLSizeDependentType(ASTContext &C, QualType Ty) {
   QualType DesugaredTy = Ty;
   do {
     ArrayRef<StringRef> Names(SizeTypeNames);
-    auto Match = llvm::find(Names, DesugaredTy.getAsString());
+    auto Match = llvm::find(Names, DesugaredTy.getUnqualifiedType().getAsString());
     if (Names.end() != Match)
       return true;
 
