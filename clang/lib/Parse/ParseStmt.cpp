@@ -1232,7 +1232,8 @@ struct MisleadingIndentationChecker {
       return 0;
 
     const char *EndPos = BufData.data() + FIDAndOffset.second;
-    assert(FIDAndOffset.second > ColNo &&
+    // FileOffset are 0-based and Column numbers are 1-based
+    assert(FIDAndOffset.second + 1 >= ColNo &&
            "Column number smaller than file offset?");
 
     unsigned VisualColumn = 0; // Stored as 0-based column, here.
