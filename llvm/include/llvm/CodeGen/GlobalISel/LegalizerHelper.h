@@ -221,6 +221,7 @@ public:
   LegalizeResult narrowScalarBasic(MachineInstr &MI, unsigned TypeIdx, LLT Ty);
   LegalizeResult narrowScalarSelect(MachineInstr &MI, unsigned TypeIdx, LLT Ty);
 
+  LegalizeResult lowerBitcast(MachineInstr &MI);
   LegalizeResult lowerBitCount(MachineInstr &MI, unsigned TypeIdx, LLT Ty);
 
   LegalizeResult lowerU64ToF32BitOps(MachineInstr &MI);
@@ -240,6 +241,7 @@ public:
   LegalizeResult lowerSADDO_SSUBO(MachineInstr &MI);
   LegalizeResult lowerBswap(MachineInstr &MI);
   LegalizeResult lowerBitreverse(MachineInstr &MI);
+  LegalizeResult lowerReadRegister(MachineInstr &MI);
 
 private:
   MachineRegisterInfo &MRI;

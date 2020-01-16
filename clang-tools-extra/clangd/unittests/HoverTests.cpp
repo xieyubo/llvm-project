@@ -446,7 +446,7 @@ class Foo {})cpp";
        [](HoverInfo &HI) {
          HI.Name = "x";
          HI.NamespaceScope = "";
-         HI.Definition = "enum Color x = GREEN";
+         HI.Definition = "Color x = GREEN";
          HI.Kind = index::SymbolKind::Variable;
          HI.Type = "enum Color";
          HI.Value = "GREEN (1)"; // Symbolic when hovering on an expression.
@@ -601,6 +601,19 @@ TEST(Hover, NoHover) {
       R"cpp(// non-named decls don't get hover. Don't crash!
             ^static_assert(1, "");
           )cpp",
+      R"cpp(// non-evaluatable expr
+          template <typename T> void foo() {
+            (void)[[size^of]](T);
+          })cpp",
+      // literals
+      "auto x = t^rue;",
+      "auto x = '^A';",
+      "auto x = ^(int){42};",
+      "auto x = ^42.;",
+      "auto x = ^42.0i;",
+      "auto x = ^42;",
+      "auto x = ^nullptr;",
+      "auto x = ^\"asdf\";",
   };
 
   for (const auto &Test : Tests) {
@@ -1427,7 +1440,7 @@ TEST(Hover, All) {
             HI.NamespaceScope = "";
             HI.LocalScope = "test::";
             HI.Type = "struct Test &&";
-            HI.Definition = "struct Test &&test = {}";
+            HI.Definition = "Test &&test = {}";
             HI.Value = "{}";
           }},
       {
@@ -1475,6 +1488,31 @@ TEST(Hover, All) {
             HI.Parameters.emplace();
             HI.ReturnType = "int";
             HI.Type = "int ()";
+          }},
+      {
+          R"cpp(// type of nested templates.
+          template <class T> struct cls {};
+          cls<cls<cls<int>>> [[fo^o]];
+          )cpp",
+          [](HoverInfo &HI) {
+            HI.Definition = "cls<cls<cls<int>>> foo";
+            HI.Kind = index::SymbolKind::Variable;
+            HI.NamespaceScope = "";
+            HI.Name = "foo";
+            HI.Type = "cls<cls<cls<int> > >";
+            HI.Value = "{}";
+          }},
+      {
+          R"cpp(// type of nested templates.
+          template <class T> struct cls {};
+          [[cl^s]]<cls<cls<int>>> foo;
+          )cpp",
+          [](HoverInfo &HI) {
+            HI.Definition = "template <> struct cls<cls<cls<int>>> {}";
+            HI.Kind = index::SymbolKind::Struct;
+            HI.NamespaceScope = "";
+            HI.Name = "cls<cls<cls<int> > >";
+            HI.Documentation = "type of nested templates.";
           }},
   };
 
@@ -1606,6 +1644,7 @@ TEST(Hover, DocsFromMostSpecial) {
     }
   }
 }
+
 TEST(Hover, Present) {
   struct {
     const std::function<void(HoverInfo &)> Builder;
@@ -1640,6 +1679,7 @@ TEST(Hover, Present) {
             HI.NamespaceScope.emplace();
           },
           R"(class foo
+
 documentation
 
 template <typename T, typename C = bool> class Foo {})",
@@ -1662,7 +1702,10 @@ template <typename T, typename C = bool> class Foo {})",
             HI.NamespaceScope = "ns::";
             HI.Definition = "ret_type foo(params) {}";
           },
-          R"(function foo → ret_type
+          R"(function foo
+
+🡺 ret_type
+Parameters:
 - 
 - type
 - type foo
@@ -1680,7 +1723,9 @@ ret_type foo(params) {})",
             HI.Type = "type";
             HI.Definition = "def";
           },
-          R"(variable foo : type
+          R"(variable foo
+
+Type: type
 Value = value
 
 // In test::bar
@@ -1695,6 +1740,86 @@ def)",
   }
 }
 
+// This is a separate test as headings don't create any differences in plaintext
+// mode.
+TEST(Hover, PresentHeadings) {
+  HoverInfo HI;
+  HI.Kind = index::SymbolKind::Variable;
+  HI.Name = "foo";
+
+  EXPECT_EQ(HI.present().asMarkdown(), "### variable `foo`");
+}
+
+// This is a separate test as rulers behave differently in markdown vs
+// plaintext.
+TEST(Hover, PresentRulers) {
+  HoverInfo HI;
+  HI.Kind = index::SymbolKind::Variable;
+  HI.Name = "foo";
+  HI.Value = "val";
+  HI.Definition = "def";
+
+  llvm::StringRef ExpectedMarkdown = R"md(### variable `foo`  
+
+---
+Value \= `val`  
+
+---
+```cpp
+def
+```)md";
+  EXPECT_EQ(HI.present().asMarkdown(), ExpectedMarkdown);
+
+  llvm::StringRef ExpectedPlaintext = R"pt(variable foo
+
+Value = val
+
+def)pt";
+  EXPECT_EQ(HI.present().asPlainText(), ExpectedPlaintext);
+}
+
+TEST(Hover, ExprTests) {
+  struct {
+    const char *const Code;
+    const std::function<void(HoverInfo &)> ExpectedBuilder;
+  } Cases[] = {
+      {
+          R"cpp(// sizeof expr
+          void foo() {
+            (void)[[size^of]](char);
+          })cpp",
+          [](HoverInfo &HI) {
+            HI.Name = "expression";
+            HI.Type = "unsigned long";
+            HI.Value = "1";
+          }},
+      {
+          R"cpp(// alignof expr
+          void foo() {
+            (void)[[align^of]](char);
+          })cpp",
+          [](HoverInfo &HI) {
+            HI.Name = "expression";
+            HI.Type = "unsigned long";
+            HI.Value = "1";
+          }},
+  };
+  for (const auto &C : Cases) {
+    Annotations T(C.Code);
+    TestTU TU = TestTU::withCode(T.code());
+    auto AST = TU.build();
+    for (const auto &D : AST.getDiagnostics())
+      ADD_FAILURE() << D;
+
+    auto H = getHover(AST, T.point(), format::getLLVMStyle(), nullptr);
+    ASSERT_TRUE(H);
+    HoverInfo ExpectedHover;
+    C.ExpectedBuilder(ExpectedHover);
+    // We don't check for Type as it might differ on different platforms.
+    EXPECT_EQ(H->Name, ExpectedHover.Name);
+    EXPECT_EQ(H->Value, ExpectedHover.Value);
+  }
+}
 } // namespace
 } // namespace clangd
 } // namespace clang

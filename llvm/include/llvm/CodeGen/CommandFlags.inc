@@ -238,6 +238,10 @@ static cl::opt<bool>
                      cl::desc("Emit functions into separate sections"),
                      cl::init(false));
 
+static cl::opt<unsigned> TLSSize("tls-size",
+                                 cl::desc("Bit size of immediate TLS offsets"),
+                                 cl::init(0));
+
 static cl::opt<bool> EmulatedTLS("emulated-tls",
                                  cl::desc("Use emulated TLS model"),
                                  cl::init(false));
@@ -305,6 +309,7 @@ static TargetOptions InitTargetOptionsFromCodeGenFlags() {
   Options.DataSections = DataSections;
   Options.FunctionSections = FunctionSections;
   Options.UniqueSectionNames = UniqueSectionNames;
+  Options.TLSSize = TLSSize;
   Options.EmulatedTLS = EmulatedTLS;
   Options.ExplicitEmulatedTLS = EmulatedTLS.getNumOccurrences() > 0;
   Options.ExceptionModel = ExceptionModel;
@@ -382,8 +387,19 @@ setFunctionAttributes(StringRef CPU, StringRef Features, Function &F) {
 
   if (!CPU.empty() && !F.hasFnAttribute("target-cpu"))
     NewAttrs.addAttribute("target-cpu", CPU);
-  if (!Features.empty())
-    NewAttrs.addAttribute("target-features", Features);
+  if (!Features.empty()) {
+    // Append the command line features to any that are already on the function.
+    StringRef OldFeatures
+      = F.getFnAttribute("target-features").getValueAsString();
+    if (OldFeatures.empty())
+      NewAttrs.addAttribute("target-features", Features);
+    else {
+      SmallString<256> Appended(OldFeatures);
+      Appended.push_back(',');
+      Appended.append(Features);
+      NewAttrs.addAttribute("target-features", Appended);
+    }
+  }
   if (FramePointerUsage.getNumOccurrences() > 0) {
     if (FramePointerUsage == llvm::FramePointer::All)
       NewAttrs.addAttribute("frame-pointer", "all");

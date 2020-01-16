@@ -13,21 +13,28 @@
 #include "FindTarget.h"
 #include "FormattedString.h"
 #include "Logger.h"
+#include "ParsedAST.h"
 #include "Selection.h"
 #include "SourceCode.h"
 #include "index/SymbolCollector.h"
-
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/ASTTypeTraits.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclBase.h"
 #include "clang/AST/DeclTemplate.h"
+#include "clang/AST/Expr.h"
+#include "clang/AST/ExprCXX.h"
 #include "clang/AST/PrettyPrinter.h"
+#include "clang/AST/Type.h"
 #include "clang/Index/IndexSymbol.h"
+#include "llvm/ADT/None.h"
+#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/Casting.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include <string>
 
@@ -101,6 +108,7 @@ std::string printDefinition(const Decl *D) {
       printingPolicyForDecls(D->getASTContext().getPrintingPolicy());
   Policy.IncludeTagDefinition = false;
   Policy.SuppressTemplateArgsInCXXConstructors = true;
+  Policy.SuppressTagKeyword = true;
   D->print(OS, Policy);
   OS.flush();
   return Definition;
@@ -233,9 +241,7 @@ void fillFunctionTypeAndParams(HoverInfo &HI, const Decl *D,
     HI.Parameters->emplace_back();
     auto &P = HI.Parameters->back();
     if (!PVD->getType().isNull()) {
-      P.Type.emplace();
-      llvm::raw_string_ostream OS(*P.Type);
-      PVD->getType().print(OS, Policy);
+      P.Type = PVD->getType().getAsString(Policy);
     } else {
       std::string Param;
       llvm::raw_string_ostream OS(Param);
@@ -344,13 +350,10 @@ HoverInfo getHoverContents(const NamedDecl *D, const SymbolIndex *Index) {
   }
 
   // Fill in types and params.
-  if (const FunctionDecl *FD = getUnderlyingFunction(D)) {
+  if (const FunctionDecl *FD = getUnderlyingFunction(D))
     fillFunctionTypeAndParams(HI, D, FD, Policy);
-  } else if (const auto *VD = dyn_cast<ValueDecl>(D)) {
-    HI.Type.emplace();
-    llvm::raw_string_ostream OS(*HI.Type);
-    VD->getType().print(OS, Policy);
-  }
+  else if (const auto *VD = dyn_cast<ValueDecl>(D))
+    HI.Type = VD->getType().getAsString(Policy);
 
   // Fill in value with evaluated initializer if possible.
   if (const auto *Var = dyn_cast<VarDecl>(D)) {
@@ -380,9 +383,9 @@ HoverInfo getHoverContents(QualType T, ASTContext &ASTCtx,
     enhanceFromIndex(HI, *CommentD, Index);
   } else {
     // Builtin types
-    llvm::raw_string_ostream OS(HI.Name);
-    PrintingPolicy Policy = printingPolicyForDecls(ASTCtx.getPrintingPolicy());
-    T.print(OS, Policy);
+    auto Policy = printingPolicyForDecls(ASTCtx.getPrintingPolicy());
+    Policy.SuppressTagKeyword = true;
+    HI.Name = T.getAsString(Policy);
   }
   return HI;
 }
@@ -414,6 +417,45 @@ HoverInfo getHoverContents(const DefinedMacro &Macro, ParsedAST &AST) {
   }
   return HI;
 }
+
+bool isLiteral(const Expr *E) {
+  // Unfortunately there's no common base Literal classes inherits from
+  // (apart from Expr), therefore this is a nasty blacklist.
+  return llvm::isa<CharacterLiteral>(E) || llvm::isa<CompoundLiteralExpr>(E) ||
+         llvm::isa<CXXBoolLiteralExpr>(E) ||
+         llvm::isa<CXXNullPtrLiteralExpr>(E) ||
+         llvm::isa<FixedPointLiteral>(E) || llvm::isa<FloatingLiteral>(E) ||
+         llvm::isa<ImaginaryLiteral>(E) || llvm::isa<IntegerLiteral>(E) ||
+         llvm::isa<StringLiteral>(E) || llvm::isa<UserDefinedLiteral>(E);
+}
+
+llvm::StringLiteral getNameForExpr(const Expr *E) {
+  // FIXME: Come up with names for `special` expressions.
+  return "expression";
+}
+
+// Generates hover info for evaluatable expressions.
+// FIXME: Support hover for literals (esp user-defined)
+llvm::Optional<HoverInfo> getHoverContents(const Expr *E, ParsedAST &AST) {
+  // There's not much value in hovering over "42" and getting a hover card
+  // saying "42 is an int", similar for other literals.
+  if (isLiteral(E))
+    return llvm::None;
+
+  HoverInfo HI;
+  // For expressions we currently print the type and the value, iff it is
+  // evaluatable.
+  if (auto Val = printExprValue(E, AST.getASTContext())) {
+    auto Policy =
+        printingPolicyForDecls(AST.getASTContext().getPrintingPolicy());
+    Policy.SuppressTagKeyword = true;
+    HI.Type = E->getType().getAsString(Policy);
+    HI.Value = *Val;
+    HI.Name = getNameForExpr(E);
+    return HI;
+  }
+  return llvm::None;
+}
 } // namespace
 
 llvm::Optional<HoverInfo> getHover(ParsedAST &AST, Position Pos,
@@ -443,11 +485,11 @@ llvm::Optional<HoverInfo> getHover(ParsedAST &AST, Position Pos,
         // Look for a close enclosing expression to show the value of.
         if (!HI->Value)
           HI->Value = printExprValue(N, AST.getASTContext());
+      } else if (const Expr *E = N->ASTNode.get<Expr>()) {
+        HI = getHoverContents(E, AST);
       }
       // FIXME: support hovers for other nodes?
-      //  - certain expressions (sizeof etc)
       //  - built-in types
-      //  - literals (esp user-defined)
     }
   }
 
@@ -468,34 +510,45 @@ llvm::Optional<HoverInfo> getHover(ParsedAST &AST, Position Pos,
 markup::Document HoverInfo::present() const {
   markup::Document Output;
   // Header contains a text of the form:
-  // variable `var` : `int`
+  // variable `var`
   //
   // class `X`
   //
-  // function `foo` → `int`
-  markup::Paragraph &Header = Output.addParagraph();
+  // function `foo`
+  //
+  // expression
+  //
+  // Note that we are making use of a level-3 heading because VSCode renders
+  // level 1 and 2 headers in a huge font, see
+  // https://github.com/microsoft/vscode/issues/88417 for details.
+  markup::Paragraph &Header = Output.addHeading(3);
   Header.appendText(index::getSymbolKindString(Kind));
   assert(!Name.empty() && "hover triggered on a nameless symbol");
   Header.appendCode(Name);
-  if (ReturnType) {
-    Header.appendText("→");
-    Header.appendCode(*ReturnType);
-  } else if (Type) {
-    Header.appendText(":");
-    Header.appendCode(*Type);
-  }
 
-  // For functions we display signature in a list form, e.g.:
-  // - `bool param1`
-  // - `int param2 = 5`
-  if (Parameters && !Parameters->empty()) {
-    markup::BulletList &L = Output.addBulletList();
-    for (const auto &Param : *Parameters) {
-      std::string Buffer;
-      llvm::raw_string_ostream OS(Buffer);
-      OS << Param;
-      L.addItem().addParagraph().appendCode(std::move(OS.str()));
+  // Put a linebreak after header to increase readability.
+  Output.addRuler();
+  // Print Types on their own lines to reduce chances of getting line-wrapped by
+  // editor, as they might be long.
+  if (ReturnType) {
+    // For functions we display signature in a list form, e.g.:
+    // 🡺 `x`
+    // Parameters:
+    // - `bool param1`
+    // - `int param2 = 5`
+    Output.addParagraph().appendText("🡺").appendCode(*ReturnType);
+    if (Parameters && !Parameters->empty()) {
+      Output.addParagraph().appendText("Parameters:");
+      markup::BulletList &L = Output.addBulletList();
+      for (const auto &Param : *Parameters) {
+        std::string Buffer;
+        llvm::raw_string_ostream OS(Buffer);
+        OS << Param;
+        L.addItem().addParagraph().appendCode(std::move(OS.str()));
+      }
     }
+  } else if (Type) {
+    Output.addParagraph().appendText("Type: ").appendCode(*Type);
   }
 
   if (Value) {
@@ -508,6 +561,7 @@ markup::Document HoverInfo::present() const {
     Output.addParagraph().appendText(Documentation);
 
   if (!Definition.empty()) {
+    Output.addRuler();
     std::string ScopeComment;
     // Drop trailing "::".
     if (!LocalScope.empty()) {
