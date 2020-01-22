@@ -374,6 +374,11 @@ public:
       void VisitTagType(const TagType *TT) {
         Outer.add(TT->getAsTagDecl(), Flags);
       }
+
+      void VisitInjectedClassNameType(const InjectedClassNameType *ICNT) {
+        Outer.add(ICNT->getDecl(), Flags);
+      }
+
       void VisitDecltypeType(const DecltypeType *DTT) {
         Outer.add(DTT->getUnderlyingType(), Flags | Rel::Underlying);
       }
@@ -581,6 +586,13 @@ llvm::SmallVector<ReferenceLoc, 2> refInDecl(const Decl *D) {
     }
 
     void VisitNamedDecl(const NamedDecl *ND) {
+      // We choose to ignore {Class, Function, Var, TypeAlias}TemplateDecls. As
+      // as their underlying decls, covering the same range, will be visited.
+      if (llvm::isa<ClassTemplateDecl>(ND) ||
+          llvm::isa<FunctionTemplateDecl>(ND) ||
+          llvm::isa<VarTemplateDecl>(ND) ||
+          llvm::isa<TypeAliasTemplateDecl>(ND))
+        return;
       // FIXME: decide on how to surface destructors when we need them.
       if (llvm::isa<CXXDestructorDecl>(ND))
         return;
@@ -614,6 +626,10 @@ llvm::SmallVector<ReferenceLoc, 2> refInExpr(const Expr *E) {
     }
 
     void VisitMemberExpr(const MemberExpr *E) {
+      // Skip destructor calls to avoid duplication: TypeLoc within will be
+      // visited separately.
+      if (llvm::dyn_cast<CXXDestructorDecl>(E->getFoundDecl().getDecl()))
+        return;
       Refs.push_back(ReferenceLoc{E->getQualifierLoc(),
                                   E->getMemberNameInfo().getLoc(),
                                   /*IsDecl=*/false,
@@ -689,6 +705,13 @@ llvm::SmallVector<ReferenceLoc, 2> refInTypeLoc(TypeLoc L) {
           NestedNameSpecifierLoc(), L.getNameLoc(), /*IsDecl=*/false,
           explicitReferenceTargets(DynTypedNode::create(L.getType()),
                                    DeclRelation::Alias)};
+    }
+
+    void VisitInjectedClassNameTypeLoc(InjectedClassNameTypeLoc TL) {
+      Ref = ReferenceLoc{NestedNameSpecifierLoc(),
+                         TL.getNameLoc(),
+                         /*IsDecl=*/false,
+                         {TL.getDecl()}};
     }
 
     void VisitDependentTemplateSpecializationTypeLoc(

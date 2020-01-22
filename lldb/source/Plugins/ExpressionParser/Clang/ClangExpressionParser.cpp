@@ -253,7 +253,7 @@ static void SetupModuleHeaderPaths(CompilerInstance *compiler,
   }
 
   llvm::SmallString<128> module_cache;
-  auto props = ModuleList::GetGlobalModuleListProperties();
+  const auto &props = ModuleList::GetGlobalModuleListProperties();
   props.GetClangModulesCachePath().GetPath(module_cache);
   search_opts.ModuleCachePath = module_cache.str();
   LLDB_LOG(log, "Using module cache path: {0}", module_cache.c_str());
@@ -606,7 +606,8 @@ ClangExpressionParser::ClangExpressionParser(
   m_compiler->createASTContext();
   clang::ASTContext &ast_context = m_compiler->getASTContext();
 
-  m_ast_context.reset(new ClangASTContext(ast_context));
+  m_ast_context.reset(new ClangASTContext(
+      "Expression ASTContext for '" + m_filename + "'", ast_context));
 
   std::string module_name("$__lldb_module");
 

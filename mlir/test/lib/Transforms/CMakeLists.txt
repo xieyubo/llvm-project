@@ -1,4 +1,5 @@
 add_llvm_library(MLIRTestTransforms
+  TestAllReduceLowering.cpp
   TestCallGraph.cpp
   TestConstantFold.cpp
   TestLoopFusion.cpp
@@ -31,8 +32,8 @@ target_link_libraries(MLIRTestTransforms
   MLIRGPU
   MLIRLinalgOps
   MLIRLinalgTransforms
-  MLIRLinalgUtils
   MLIRLoopOps
+  MLIRGPU
   MLIRPass
   MLIRTestDialect
   MLIRVectorOps

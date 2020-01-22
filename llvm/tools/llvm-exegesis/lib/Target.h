@@ -115,6 +115,13 @@ public:
                                   MCOperand &AssignedValue,
                                   const BitVector &ForbiddenRegs) const;
 
+  // Returns true if this instruction is supported as a back-to-back
+  // instructions.
+  // FIXME: Eventually we should discover this dynamically.
+  virtual bool allowAsBackToBack(const Instruction &Instr) const {
+    return true;
+  }
+
   // Creates a snippet generator for the given mode.
   std::unique_ptr<SnippetGenerator>
   createSnippetGenerator(InstructionBenchmark::ModeE Mode,
@@ -144,9 +151,9 @@ private:
 
   // Targets can implement their own snippet generators/benchmarks runners by
   // implementing these.
-  std::unique_ptr<SnippetGenerator> virtual createLatencySnippetGenerator(
+  std::unique_ptr<SnippetGenerator> virtual createSerialSnippetGenerator(
       const LLVMState &State, const SnippetGenerator::Options &Opts) const;
-  std::unique_ptr<SnippetGenerator> virtual createUopsSnippetGenerator(
+  std::unique_ptr<SnippetGenerator> virtual createParallelSnippetGenerator(
       const LLVMState &State, const SnippetGenerator::Options &Opts) const;
   std::unique_ptr<BenchmarkRunner> virtual createLatencyBenchmarkRunner(
       const LLVMState &State, InstructionBenchmark::ModeE Mode) const;

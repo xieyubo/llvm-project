@@ -166,7 +166,6 @@ if(LLDB_BUILT_STANDALONE)
 endif()
 
 string(REPLACE ${CMAKE_CFG_INTDIR} ${dotest_args_replacement} LLDB_DOTEST_ARGS "${LLDB_DOTEST_ARGS}")
-string(REPLACE ${CMAKE_CFG_INTDIR} ${dotest_args_replacement} LLDB_DOTEST_ARGS "${LLDB_DOTEST_ARGS}")
 string(REPLACE ${CMAKE_CFG_INTDIR} ${dotest_args_replacement} LLDB_SOURCE_DIR "${LLDB_SOURCE_DIR}")
 string(REPLACE ${CMAKE_CFG_INTDIR} ${dotest_args_replacement} LLDB_TEST_BUILD_DIRECTORY "${LLDB_TEST_BUILD_DIRECTORY}")
 string(REPLACE ${CMAKE_CFG_INTDIR} ${dotest_args_replacement} LLDB_TEST_EXECUTABLE "${LLDB_TEST_EXECUTABLE}")
@@ -180,3 +179,11 @@ configure_lit_site_cfg(
   ${CMAKE_CURRENT_BINARY_DIR}/lit.site.cfg.py
   MAIN_CONFIG
   ${CMAKE_CURRENT_SOURCE_DIR}/lit.cfg.py)
+
+if (CMAKE_GENERATOR STREQUAL "Xcode")
+  # Xcode does not get the auto-generated targets. We need to create
+  # check-lldb-api manually.
+  add_lit_testsuite(check-lldb-api "Running lldb api test suite"
+    ${CMAKE_CURRENT_BINARY_DIR}
+    DEPENDS lldb-test-deps)
+endif()

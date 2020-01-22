@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 include "AMDGPU.td"
+include "AMDGPUCombine.td"
 
 def sd_vsrc0 : ComplexPattern<i32, 1, "">;
 def gi_vsrc0 :
@@ -119,6 +120,12 @@ def : GINodeEquiv<G_ATOMICRMW_FADD, atomic_load_fadd_glue>;
 def : GINodeEquiv<G_AMDGPU_FFBH_U32, AMDGPUffbh_u32>;
 def : GINodeEquiv<G_AMDGPU_ATOMIC_CMPXCHG, AMDGPUatomic_cmp_swap>;
 
+// FIXME: Check MMO is atomic
+def : GINodeEquiv<G_AMDGPU_ATOMIC_INC, SIatomic_inc>;
+def : GINodeEquiv<G_AMDGPU_ATOMIC_DEC, SIatomic_dec>;
+def : GINodeEquiv<G_AMDGPU_ATOMIC_INC, atomic_inc_glue>;
+def : GINodeEquiv<G_AMDGPU_ATOMIC_DEC, atomic_dec_glue>;
+
 
 class GISelSop2Pat <
   SDPatternOperator node,
@@ -206,11 +213,14 @@ foreach Ty = [i64, p0, p1, p4] in {
   defm : SMRD_Pattern <"S_LOAD_DWORDX2",  Ty>;
 }
 
-def gi_as_i32timm : GICustomOperandRenderer<"renderTruncImm32">,
+def gi_as_i32timm : GICustomOperandRenderer<"renderTruncTImm32">,
   GISDNodeXFormEquiv<as_i32timm>;
 
-def gi_as_i16timm : GICustomOperandRenderer<"renderTruncTImm">,
+def gi_as_i16timm : GICustomOperandRenderer<"renderTruncTImm16">,
   GISDNodeXFormEquiv<as_i16timm>;
+
+def gi_as_i1timm : GICustomOperandRenderer<"renderTruncTImm1">,
+  GISDNodeXFormEquiv<as_i1timm>;
 
 def gi_NegateImm : GICustomOperandRenderer<"renderNegateImm">,
   GISDNodeXFormEquiv<NegateImm>;

@@ -1332,8 +1332,14 @@ SDValue SelectionDAG::getIntPtrConstant(uint64_t Val, const SDLoc &DL,
 
 SDValue SelectionDAG::getShiftAmountConstant(uint64_t Val, EVT VT,
                                              const SDLoc &DL, bool LegalTypes) {
+  assert(VT.isInteger() && "Shift amount is not an integer type!");
   EVT ShiftVT = TLI->getShiftAmountTy(VT, getDataLayout(), LegalTypes);
   return getConstant(Val, DL, ShiftVT);
+}
+
+SDValue SelectionDAG::getVectorIdxConstant(uint64_t Val, const SDLoc &DL,
+                                           bool isTarget) {
+  return getConstant(Val, DL, TLI->getVectorIdxTy(getDataLayout()), isTarget);
 }
 
 SDValue SelectionDAG::getConstantFP(const APFloat &V, const SDLoc &DL, EVT VT,
@@ -2179,6 +2185,8 @@ SDValue SelectionDAG::GetDemandedBits(SDValue V, const APInt &DemandedBits,
                                       const APInt &DemandedElts) {
   switch (V.getOpcode()) {
   default:
+    return TLI->SimplifyMultipleUseDemandedBits(V, DemandedBits, DemandedElts,
+                                                *this, 0);
     break;
   case ISD::Constant: {
     auto *CV = cast<ConstantSDNode>(V.getNode());
@@ -2189,11 +2197,6 @@ SDValue SelectionDAG::GetDemandedBits(SDValue V, const APInt &DemandedBits,
       return getConstant(NewVal, SDLoc(V), V.getValueType());
     break;
   }
-  case ISD::OR:
-  case ISD::XOR:
-  case ISD::SIGN_EXTEND_INREG:
-    return TLI->SimplifyMultipleUseDemandedBits(V, DemandedBits, DemandedElts,
-                                                *this, 0);
   case ISD::SRL:
     // Only look at single-use SRLs.
     if (!V.getNode()->hasOneUse())
@@ -2222,19 +2225,6 @@ SDValue SelectionDAG::GetDemandedBits(SDValue V, const APInt &DemandedBits,
                                   AndVal))
         return V.getOperand(0);
     }
-    break;
-  }
-  case ISD::ANY_EXTEND: {
-    SDValue Src = V.getOperand(0);
-    unsigned SrcBitWidth = Src.getScalarValueSizeInBits();
-    // Being conservative here - only peek through if we only demand bits in the
-    // non-extended source (even though the extended bits are technically
-    // undef).
-    if (DemandedBits.getActiveBits() > SrcBitWidth)
-      break;
-    APInt SrcDemandedBits = DemandedBits.trunc(SrcBitWidth);
-    if (SDValue DemandedSrc = GetDemandedBits(Src, SrcDemandedBits))
-      return getNode(ISD::ANY_EXTEND, SDLoc(V), V.getValueType(), DemandedSrc);
     break;
   }
   }
@@ -2413,7 +2403,7 @@ SDValue SelectionDAG::getSplatValue(SDValue V) {
   if (SDValue SrcVector = getSplatSourceVector(V, SplatIdx))
     return getNode(ISD::EXTRACT_VECTOR_ELT, SDLoc(V),
                    SrcVector.getValueType().getScalarType(), SrcVector,
-                   getIntPtrConstant(SplatIdx, SDLoc(V)));
+                   getVectorIdxConstant(SplatIdx, SDLoc(V)));
   return SDValue();
 }
 
@@ -3099,8 +3089,15 @@ KnownBits SelectionDAG::computeKnownBits(SDValue Op, const APInt &DemandedElts,
     Known = Known.sext(BitWidth);
     break;
   }
+  case ISD::ANY_EXTEND_VECTOR_INREG: {
+    EVT InVT = Op.getOperand(0).getValueType();
+    APInt InDemandedElts = DemandedElts.zextOrSelf(InVT.getVectorNumElements());
+    Known = computeKnownBits(Op.getOperand(0), InDemandedElts, Depth + 1);
+    Known = Known.zext(BitWidth, false /* ExtendedBitsAreKnownZero */);
+    break;
+  }
   case ISD::ANY_EXTEND: {
-    Known = computeKnownBits(Op.getOperand(0), Depth+1);
+    Known = computeKnownBits(Op.getOperand(0), DemandedElts, Depth + 1);
     Known = Known.zext(BitWidth, false /* ExtendedBitsAreKnownZero */);
     break;
   }
@@ -3134,6 +3131,9 @@ KnownBits SelectionDAG::computeKnownBits(SDValue Op, const APInt &DemandedElts,
     LLVM_FALLTHROUGH;
   case ISD::SUB:
   case ISD::SUBC: {
+    assert(Op.getResNo() == 0 &&
+           "We only compute knownbits for the difference here.");
+
     Known = computeKnownBits(Op.getOperand(0), DemandedElts, Depth + 1);
     Known2 = computeKnownBits(Op.getOperand(1), DemandedElts, Depth + 1);
     Known = KnownBits::computeForAddSub(/* Add */ false, /* NSW */ false,
@@ -5186,11 +5186,20 @@ SDValue SelectionDAG::getNode(unsigned Opcode, const SDLoc &DL, EVT VT,
     if (N2C && N2C->isNullValue())
       return N1;
     break;
+  case ISD::MUL:
+    assert(VT.isInteger() && "This operator does not apply to FP types!");
+    assert(N1.getValueType() == N2.getValueType() &&
+           N1.getValueType() == VT && "Binary operator types must match!");
+    if (N2C && (N1.getOpcode() == ISD::VSCALE) && Flags.hasNoSignedWrap()) {
+      APInt MulImm = cast<ConstantSDNode>(N1->getOperand(0))->getAPIntValue();
+      APInt N2CImm = N2C->getAPIntValue();
+      return getVScale(DL, VT, MulImm * N2CImm);
+    }
+    break;
   case ISD::UDIV:
   case ISD::UREM:
   case ISD::MULHU:
   case ISD::MULHS:
-  case ISD::MUL:
   case ISD::SDIV:
   case ISD::SREM:
   case ISD::SMIN:
@@ -5223,6 +5232,12 @@ SDValue SelectionDAG::getNode(unsigned Opcode, const SDLoc &DL, EVT VT,
            "Invalid FCOPYSIGN!");
     break;
   case ISD::SHL:
+    if (N2C && (N1.getOpcode() == ISD::VSCALE) && Flags.hasNoSignedWrap()) {
+      APInt MulImm = cast<ConstantSDNode>(N1->getOperand(0))->getAPIntValue();
+      APInt ShiftImm = N2C->getAPIntValue();
+      return getVScale(DL, VT, MulImm << ShiftImm);
+    }
+    LLVM_FALLTHROUGH;
   case ISD::SRA:
   case ISD::SRL:
     if (SDValue V = simplifyShift(N1, N2))
@@ -5336,8 +5351,7 @@ SDValue SelectionDAG::getNode(unsigned Opcode, const SDLoc &DL, EVT VT,
         N1.getOperand(0).getValueType().getVectorNumElements();
       return getNode(ISD::EXTRACT_VECTOR_ELT, DL, VT,
                      N1.getOperand(N2C->getZExtValue() / Factor),
-                     getConstant(N2C->getZExtValue() % Factor, DL,
-                                 N2.getValueType()));
+                     getVectorIdxConstant(N2C->getZExtValue() % Factor, DL));
     }
 
     // EXTRACT_VECTOR_ELT of BUILD_VECTOR is often formed while lowering is
@@ -6810,9 +6824,10 @@ SDValue SelectionDAG::getLoad(ISD::MemIndexedMode AM, ISD::LoadExtType ExtType,
   if (PtrInfo.V.isNull())
     PtrInfo = InferPointerInfo(PtrInfo, *this, Ptr, Offset);
 
+  uint64_t Size = MemoryLocation::getSizeOrUnknown(MemVT.getStoreSize());
   MachineFunction &MF = getMachineFunction();
   MachineMemOperand *MMO = MF.getMachineMemOperand(
-      PtrInfo, MMOFlags, MemVT.getStoreSize(), Alignment, AAInfo, Ranges);
+      PtrInfo, MMOFlags, Size, Alignment, AAInfo, Ranges);
   return getLoad(AM, ExtType, VT, dl, Chain, Ptr, Offset, MemVT, MMO);
 }
 
@@ -6932,8 +6947,10 @@ SDValue SelectionDAG::getStore(SDValue Chain, const SDLoc &dl, SDValue Val,
     PtrInfo = InferPointerInfo(PtrInfo, *this, Ptr);
 
   MachineFunction &MF = getMachineFunction();
-  MachineMemOperand *MMO = MF.getMachineMemOperand(
-      PtrInfo, MMOFlags, Val.getValueType().getStoreSize(), Alignment, AAInfo);
+  uint64_t Size =
+      MemoryLocation::getSizeOrUnknown(Val.getValueType().getStoreSize());
+  MachineMemOperand *MMO =
+      MF.getMachineMemOperand(PtrInfo, MMOFlags, Size, Alignment, AAInfo);
   return getStore(Chain, dl, Val, Ptr, MMO);
 }
 
@@ -9196,9 +9213,8 @@ SelectionDAG::matchBinOpReduction(SDNode *Extract, ISD::NodeType &BinOp,
     if (!TLI->isExtractSubvectorCheap(SubVT, OpVT, 0))
       return SDValue();
     BinOp = (ISD::NodeType)CandidateBinOp;
-    return getNode(
-        ISD::EXTRACT_SUBVECTOR, SDLoc(Op), SubVT, Op,
-        getConstant(0, SDLoc(Op), TLI->getVectorIdxTy(getDataLayout())));
+    return getNode(ISD::EXTRACT_SUBVECTOR, SDLoc(Op), SubVT, Op,
+                   getVectorIdxConstant(0, SDLoc(Op)));
   };
 
   // At each stage, we're looking for something that looks like:
@@ -9276,9 +9292,8 @@ SDValue SelectionDAG::UnrollVectorOp(SDNode *N, unsigned ResNE) {
       if (OperandVT.isVector()) {
         // A vector operand; extract a single element.
         EVT OperandEltVT = OperandVT.getVectorElementType();
-        Operands[j] =
-            getNode(ISD::EXTRACT_VECTOR_ELT, dl, OperandEltVT, Operand,
-                    getConstant(i, dl, TLI->getVectorIdxTy(getDataLayout())));
+        Operands[j] = getNode(ISD::EXTRACT_VECTOR_ELT, dl, OperandEltVT,
+                              Operand, getVectorIdxConstant(i, dl));
       } else {
         // A scalar operand; just use it as is.
         Operands[j] = Operand;
@@ -9456,11 +9471,10 @@ SelectionDAG::SplitVector(const SDValue &N, const SDLoc &DL, const EVT &LoVT,
          N.getValueType().getVectorNumElements() &&
          "More vector elements requested than available!");
   SDValue Lo, Hi;
-  Lo = getNode(ISD::EXTRACT_SUBVECTOR, DL, LoVT, N,
-               getConstant(0, DL, TLI->getVectorIdxTy(getDataLayout())));
+  Lo =
+      getNode(ISD::EXTRACT_SUBVECTOR, DL, LoVT, N, getVectorIdxConstant(0, DL));
   Hi = getNode(ISD::EXTRACT_SUBVECTOR, DL, HiVT, N,
-               getConstant(LoVT.getVectorNumElements(), DL,
-                           TLI->getVectorIdxTy(getDataLayout())));
+               getVectorIdxConstant(LoVT.getVectorNumElements(), DL));
   return std::make_pair(Lo, Hi);
 }
 
@@ -9470,7 +9484,7 @@ SDValue SelectionDAG::WidenVector(const SDValue &N, const SDLoc &DL) {
   EVT WideVT = EVT::getVectorVT(*getContext(), VT.getVectorElementType(),
                                 NextPowerOf2(VT.getVectorNumElements()));
   return getNode(ISD::INSERT_SUBVECTOR, DL, WideVT, getUNDEF(WideVT), N,
-                 getConstant(0, DL, TLI->getVectorIdxTy(getDataLayout())));
+                 getVectorIdxConstant(0, DL));
 }
 
 void SelectionDAG::ExtractVectorElements(SDValue Op,
@@ -9481,11 +9495,10 @@ void SelectionDAG::ExtractVectorElements(SDValue Op,
     Count = VT.getVectorNumElements();
 
   EVT EltVT = VT.getVectorElementType();
-  EVT IdxTy = TLI->getVectorIdxTy(getDataLayout());
   SDLoc SL(Op);
   for (unsigned i = Start, e = Start + Count; i != e; ++i) {
-    Args.push_back(getNode(ISD::EXTRACT_VECTOR_ELT, SL, EltVT,
-                           Op, getConstant(i, SL, IdxTy)));
+    Args.push_back(getNode(ISD::EXTRACT_VECTOR_ELT, SL, EltVT, Op,
+                           getVectorIdxConstant(i, SL)));
   }
 }
 

@@ -58,7 +58,7 @@ static mlir::PassRegistration<TestPatternDriver>
 //===----------------------------------------------------------------------===//
 
 namespace {
-// Generate ops for each instance where the type can be succesfully infered.
+// Generate ops for each instance where the type can be successfully infered.
 template <typename OpTy>
 static void invokeCreateWithInferedReturnType(Operation *op) {
   auto *context = op->getContext();
@@ -103,26 +103,6 @@ struct TestReturnTypeDriver : public FunctionPass<TestReturnTypeDriver> {
       };
       return;
     }
-
-    // Verification check.
-    // TODO: Move to ops that implement type infer interface.
-    getFunction().walk([this](Operation *op) -> void {
-      auto retTypeFn = dyn_cast<InferTypeOpInterface>(op);
-      if (!retTypeFn)
-        return;
-      auto *context = &getContext();
-      SmallVector<Type, 2> inferedReturnTypes;
-      if (failed(retTypeFn.inferReturnTypes(
-              context, op->getLoc(), op->getOperands(), op->getAttrs(),
-              op->getRegions(), inferedReturnTypes)))
-        return;
-      SmallVector<Type, 1> resultTypes(op->getResultTypes());
-      if (!retTypeFn.isCompatibleReturnTypes(inferedReturnTypes, resultTypes)) {
-        op->emitOpError(
-            "inferred type incompatible with return type of operation");
-        return;
-      }
-    });
   }
 };
 } // end anonymous namespace
