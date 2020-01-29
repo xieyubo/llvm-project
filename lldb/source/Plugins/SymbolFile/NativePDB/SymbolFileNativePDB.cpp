@@ -139,7 +139,7 @@ loadMatchingPDBFile(std::string exe_path, llvm::BumpPtrAllocator &allocator) {
   ec = llvm::identify_magic(pdb_file, magic);
   if (ec || magic != llvm::file_magic::pdb)
     return nullptr;
-  std::unique_ptr<PDBFile> pdb = loadPDBFile(pdb_file, allocator);
+  std::unique_ptr<PDBFile> pdb = loadPDBFile(std::string(pdb_file), allocator);
   if (!pdb)
     return nullptr;
 
@@ -452,7 +452,7 @@ lldb::TypeSP SymbolFileNativePDB::CreateModifierType(PdbTypeSymId type_id,
 
   std::string name;
   if (mr.ModifiedType.isSimple())
-    name = GetSimpleTypeName(mr.ModifiedType.getSimpleKind());
+    name = std::string(GetSimpleTypeName(mr.ModifiedType.getSimpleKind()));
   else
     name = computeTypeName(stream.typeCollection(), mr.ModifiedType);
   Declaration decl;
@@ -532,14 +532,14 @@ static std::string GetUnqualifiedTypeName(const TagRecord &record) {
     MSVCUndecoratedNameParser parser(record.Name);
     llvm::ArrayRef<MSVCUndecoratedNameSpecifier> specs = parser.GetSpecifiers();
 
-    return specs.back().GetBaseName();
+    return std::string(specs.back().GetBaseName());
   }
 
   llvm::ms_demangle::Demangler demangler;
   StringView sv(record.UniqueName.begin(), record.UniqueName.size());
   llvm::ms_demangle::TagTypeNode *ttn = demangler.parseTagUniqueName(sv);
   if (demangler.Error)
-    return record.Name;
+    return std::string(record.Name);
 
   llvm::ms_demangle::IdentifierNode *idn =
       ttn->QualifiedName->getUnqualifiedIdentifier();
@@ -1021,7 +1021,7 @@ uint32_t SymbolFileNativePDB::ResolveSymbolContext(
   return 0;
 }
 
-static void AppendLineEntryToSequence(LineSequence &sequence,
+static void AppendLineEntryToSequence(LineTable &table, LineSequence &sequence,
                                       const CompilandIndexItem &cci,
                                       lldb::addr_t base_addr,
                                       uint32_t file_number,
@@ -1040,18 +1040,21 @@ static void AppendLineEntryToSequence(LineSequence &sequence,
 
   uint32_t lno = cur_info.getStartLine();
 
-  LineTable::AppendLineEntryToSequence(&sequence, addr, lno, 0, file_number,
-                                       is_statement, false, is_prologue,
-                                       is_epilogue, false);
+  table.AppendLineEntryToSequence(&sequence, addr, lno, 0, file_number,
+                                  is_statement, false, is_prologue, is_epilogue,
+                                  false);
 }
 
-static void TerminateLineSequence(const LineFragmentHeader &block,
+static void TerminateLineSequence(LineTable &table,
+                                  const LineFragmentHeader &block,
                                   lldb::addr_t base_addr, uint32_t file_number,
-                                  uint32_t last_line, LineSequence &seq) {
+                                  uint32_t last_line,
+                                  std::unique_ptr<LineSequence> seq) {
   // The end is always a terminal entry, so insert it regardless.
-  LineTable::AppendLineEntryToSequence(&seq, base_addr + block.CodeSize,
-                                       last_line, 0, file_number, false, false,
-                                       false, false, true);
+  table.AppendLineEntryToSequence(seq.get(), base_addr + block.CodeSize,
+                                  last_line, 0, file_number, false, false,
+                                  false, false, true);
+  table.InsertSequence(seq.release());
 }
 
 bool SymbolFileNativePDB::ParseLineTable(CompileUnit &comp_unit) {
@@ -1065,11 +1068,11 @@ bool SymbolFileNativePDB::ParseLineTable(CompileUnit &comp_unit) {
   CompilandIndexItem *cci =
       m_index->compilands().GetCompiland(cu_id.asCompiland().modi);
   lldbassert(cci);
+  auto line_table = std::make_unique<LineTable>(&comp_unit);
 
   // This is basically a copy of the .debug$S subsections from all original COFF
   // object files merged together with address relocations applied.  We are
   // looking for all DEBUG_S_LINES subsections.
-  std::vector<std::unique_ptr<LineSequence>> sequences;
   for (const DebugSubsectionRecord &dssr :
        cci->m_debug_stream.getSubsectionsArray()) {
     if (dssr.kind() != DebugSubsectionKind::Lines)
@@ -1108,23 +1111,20 @@ bool SymbolFileNativePDB::ParseLineTable(CompileUnit &comp_unit) {
       lldbassert(fn_iter != cci->m_file_list.end());
       uint32_t file_index = std::distance(cci->m_file_list.begin(), fn_iter);
 
-      std::unique_ptr<LineSequence> sequence =
-          LineTable::CreateLineSequenceContainer();
+      std::unique_ptr<LineSequence> sequence(
+          line_table->CreateLineSequenceContainer());
       lldbassert(!group.LineNumbers.empty());
 
       for (const LineNumberEntry &entry : group.LineNumbers) {
-        AppendLineEntryToSequence(*sequence, *cci, virtual_addr, file_index,
-                                  *lfh, entry);
+        AppendLineEntryToSequence(*line_table, *sequence, *cci, virtual_addr,
+                                  file_index, *lfh, entry);
       }
       LineInfo last_line(group.LineNumbers.back().Flags);
-      TerminateLineSequence(*lfh, virtual_addr, file_index,
-                            last_line.getEndLine(), *sequence);
-      sequences.push_back(std::move(sequence));
+      TerminateLineSequence(*line_table, *lfh, virtual_addr, file_index,
+                            last_line.getEndLine(), std::move(sequence));
     }
   }
 
-  auto line_table =
-      std::make_unique<LineTable>(&comp_unit, std::move(sequences));
   if (line_table->GetSize() == 0)
     return false;
 
