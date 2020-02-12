@@ -300,6 +300,26 @@ AST_POLYMORPHIC_MATCHER_P(isExpansionInFileMatching,
   return RE.match(Filename);
 }
 
+/// Matches statements that are (transitively) expanded from the named macro.
+/// Does not match if only part of the statement is expanded from that macro or
+/// if different parts of the the statement are expanded from different
+/// appearances of the macro.
+///
+/// FIXME: Change to be a polymorphic matcher that works on any syntactic
+/// node. There's nothing `Stmt`-specific about it.
+AST_MATCHER_P(clang::Stmt, isExpandedFromMacro, llvm::StringRef, MacroName) {
+  // Verifies that the statement' beginning and ending are both expanded from
+  // the same instance of the given macro.
+  auto& Context = Finder->getASTContext();
+  llvm::Optional<SourceLocation> B =
+      internal::getExpansionLocOfMacro(MacroName, Node.getBeginLoc(), Context);
+  if (!B) return false;
+  llvm::Optional<SourceLocation> E =
+      internal::getExpansionLocOfMacro(MacroName, Node.getEndLoc(), Context);
+  if (!E) return false;
+  return *B == *E;
+}
+
 /// Matches declarations.
 ///
 /// Examples matches \c X, \c C, and the friend declaration inside \c C;
@@ -6030,6 +6050,21 @@ extern const AstTypeMatcher<EnumType> enumType;
 extern const AstTypeMatcher<TemplateSpecializationType>
     templateSpecializationType;
 
+/// Matches C++17 deduced template specialization types, e.g. deduced class
+/// template types.
+///
+/// Given
+/// \code
+///   template <typename T>
+///   class C { public: C(T); };
+///
+///   C c(123);
+/// \endcode
+/// \c deducedTemplateSpecializationType() matches the type in the declaration
+/// of the variable \c c.
+extern const AstTypeMatcher<DeducedTemplateSpecializationType>
+    deducedTemplateSpecializationType;
+
 /// Matches types nodes representing unary type transformations.
 ///
 /// Given:
@@ -6781,6 +6816,35 @@ AST_MATCHER(ParmVarDecl, hasDefaultArgument) {
 ///   matches the expression 'new MyClass[10]'.
 AST_MATCHER(CXXNewExpr, isArray) {
   return Node.isArray();
+}
+
+/// Matches placement new expression arguments.
+///
+/// Given:
+/// \code
+///   MyClass *p1 = new (Storage, 16) MyClass();
+/// \endcode
+/// cxxNewExpr(hasPlacementArg(1, integerLiteral(equals(16))))
+///   matches the expression 'new (Storage, 16) MyClass()'.
+AST_MATCHER_P2(CXXNewExpr, hasPlacementArg, unsigned, Index,
+               internal::Matcher<Expr>, InnerMatcher) {
+  return Node.getNumPlacementArgs() > Index &&
+         InnerMatcher.matches(*Node.getPlacementArg(Index), Finder, Builder);
+}
+
+/// Matches any placement new expression arguments.
+///
+/// Given:
+/// \code
+///   MyClass *p1 = new (Storage) MyClass();
+/// \endcode
+/// cxxNewExpr(hasAnyPlacementArg(anything()))
+///   matches the expression 'new (Storage, 16) MyClass()'.
+AST_MATCHER_P(CXXNewExpr, hasAnyPlacementArg, internal::Matcher<Expr>,
+              InnerMatcher) {
+  return llvm::any_of(Node.placement_arguments(), [&](const Expr *Arg) {
+    return InnerMatcher.matches(*Arg, Finder, Builder);
+  });
 }
 
 /// Matches array new expressions with a given array size.

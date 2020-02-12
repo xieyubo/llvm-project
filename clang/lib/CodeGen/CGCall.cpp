@@ -1749,14 +1749,14 @@ void CodeGenModule::ConstructDefaultFnAttrList(StringRef Name, bool HasOptnone,
       FuncAttrs.addAttribute("null-pointer-is-valid", "true");
 
     // TODO: Omit attribute when the default is IEEE.
-    if (CodeGenOpts.FPDenormalMode != llvm::DenormalMode::Invalid)
+    if (CodeGenOpts.FPDenormalMode.isValid())
       FuncAttrs.addAttribute("denormal-fp-math",
-                             llvm::denormalModeName(CodeGenOpts.FPDenormalMode));
-
-    if (CodeGenOpts.FP32DenormalMode != llvm::DenormalMode::Invalid)
+                             CodeGenOpts.FPDenormalMode.str());
+    if (CodeGenOpts.FP32DenormalMode.isValid()) {
       FuncAttrs.addAttribute(
           "denormal-fp-math-f32",
-          llvm::denormalModeName(CodeGenOpts.FP32DenormalMode));
+          CodeGenOpts.FP32DenormalMode.str());
+    }
 
     FuncAttrs.addAttribute("no-trapping-math",
                            llvm::toStringRef(CodeGenOpts.NoTrappingMath));
@@ -2054,8 +2054,8 @@ void CodeGenModule::ConstructAttributeList(
   if (const auto *RefTy = RetTy->getAs<ReferenceType>()) {
     QualType PTy = RefTy->getPointeeType();
     if (!PTy->isIncompleteType() && PTy->isConstantSizeType())
-      RetAttrs.addDereferenceableAttr(getContext().getTypeSizeInChars(PTy)
-                                        .getQuantity());
+      RetAttrs.addDereferenceableAttr(
+          getMinimumObjectSize(PTy).getQuantity());
     else if (getContext().getTargetAddressSpace(PTy) == 0 &&
              !CodeGenOpts.NullPointerIsValid)
       RetAttrs.addAttribute(llvm::Attribute::NonNull);
@@ -2164,8 +2164,8 @@ void CodeGenModule::ConstructAttributeList(
     if (const auto *RefTy = ParamType->getAs<ReferenceType>()) {
       QualType PTy = RefTy->getPointeeType();
       if (!PTy->isIncompleteType() && PTy->isConstantSizeType())
-        Attrs.addDereferenceableAttr(getContext().getTypeSizeInChars(PTy)
-                                       .getQuantity());
+        Attrs.addDereferenceableAttr(
+            getMinimumObjectSize(PTy).getQuantity());
       else if (getContext().getTargetAddressSpace(PTy) == 0 &&
                !CodeGenOpts.NullPointerIsValid)
         Attrs.addAttribute(llvm::Attribute::NonNull);
@@ -2370,6 +2370,9 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
       auto FieldIndex = ArgI.getInAllocaFieldIndex();
       Address V =
           Builder.CreateStructGEP(ArgStruct, FieldIndex, Arg->getName());
+      if (ArgI.getInAllocaIndirect())
+        V = Address(Builder.CreateLoad(V),
+                    getContext().getTypeAlignInChars(Ty));
       ArgVals.push_back(ParamValue::forIndirect(V));
       break;
     }
@@ -3035,6 +3038,11 @@ void CodeGenFunction::EmitReturnValueCheck(llvm::Value *RV) {
   if (!CurCodeDecl)
     return;
 
+  // If the return block isn't reachable, neither is this check, so don't emit
+  // it.
+  if (ReturnBlock.isValid() && ReturnBlock.getBlock()->use_empty())
+    return;
+
   ReturnsNonNullAttr *RetNNAttr = nullptr;
   if (SanOpts.has(SanitizerKind::ReturnsNonnullAttribute))
     RetNNAttr = CurCodeDecl->getAttr<ReturnsNonNullAttr>();
@@ -3055,7 +3063,7 @@ void CodeGenFunction::EmitReturnValueCheck(llvm::Value *RV) {
   } else {
     if (auto *DD = dyn_cast<DeclaratorDecl>(CurCodeDecl))
       if (auto *TSI = DD->getTypeSourceInfo())
-        if (auto FTL = TSI->getTypeLoc().castAs<FunctionTypeLoc>())
+        if (auto FTL = TSI->getTypeLoc().getAsAdjusted<FunctionTypeLoc>())
           AttrLoc = FTL.getReturnLoc().findNullabilityLoc();
     CheckKind = SanitizerKind::NullabilityReturn;
     Handler = SanitizerHandler::NullabilityReturn;
@@ -3684,7 +3692,24 @@ void CodeGenFunction::EmitCallArg(CallArgList &args, const Expr *E,
     return;
   }
 
-  args.add(EmitAnyExprToTemp(E), type);
+  AggValueSlot ArgSlot = AggValueSlot::ignored();
+  Address ArgSlotAlloca = Address::invalid();
+  if (hasAggregateEvaluationKind(E->getType())) {
+    ArgSlot = CreateAggTemp(E->getType(), "agg.tmp", &ArgSlotAlloca);
+
+    // Emit a lifetime start/end for this temporary. If the type has a
+    // destructor, then we need to keep it alive. FIXME: We should still be able
+    // to end the lifetime after the destructor returns.
+    if (!E->getType().isDestructedType()) {
+      uint64_t size =
+          CGM.getDataLayout().getTypeAllocSize(ConvertTypeForMem(E->getType()));
+      if (auto *lifetimeSize =
+              EmitLifetimeStart(size, ArgSlotAlloca.getPointer()))
+        args.addLifetimeCleanup({ArgSlotAlloca.getPointer(), lifetimeSize});
+    }
+  }
+
+  args.add(EmitAnyExpr(E, ArgSlot), type);
 }
 
 QualType CodeGenFunction::getVarArgType(const Expr *Arg) {
@@ -4069,18 +4094,39 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
       assert(NumIRArgs == 0);
       assert(getTarget().getTriple().getArch() == llvm::Triple::x86);
       if (I->isAggregate()) {
-        // Replace the placeholder with the appropriate argument slot GEP.
         Address Addr = I->hasLValue()
                            ? I->getKnownLValue().getAddress(*this)
                            : I->getKnownRValue().getAggregateAddress();
         llvm::Instruction *Placeholder =
             cast<llvm::Instruction>(Addr.getPointer());
-        CGBuilderTy::InsertPoint IP = Builder.saveIP();
-        Builder.SetInsertPoint(Placeholder);
-        Addr =
-            Builder.CreateStructGEP(ArgMemory, ArgInfo.getInAllocaFieldIndex());
-        Builder.restoreIP(IP);
+
+        if (!ArgInfo.getInAllocaIndirect()) {
+          // Replace the placeholder with the appropriate argument slot GEP.
+          CGBuilderTy::InsertPoint IP = Builder.saveIP();
+          Builder.SetInsertPoint(Placeholder);
+          Addr = Builder.CreateStructGEP(ArgMemory,
+                                         ArgInfo.getInAllocaFieldIndex());
+          Builder.restoreIP(IP);
+        } else {
+          // For indirect things such as overaligned structs, replace the
+          // placeholder with a regular aggregate temporary alloca. Store the
+          // address of this alloca into the struct.
+          Addr = CreateMemTemp(info_it->type, "inalloca.indirect.tmp");
+          Address ArgSlot = Builder.CreateStructGEP(
+              ArgMemory, ArgInfo.getInAllocaFieldIndex());
+          Builder.CreateStore(Addr.getPointer(), ArgSlot);
+        }
         deferPlaceholderReplacement(Placeholder, Addr.getPointer());
+      } else if (ArgInfo.getInAllocaIndirect()) {
+        // Make a temporary alloca and store the address of it into the argument
+        // struct.
+        Address Addr = CreateMemTempWithoutCast(
+            I->Ty, getContext().getTypeAlignInChars(I->Ty),
+            "indirect-arg-temp");
+        I->copyInto(*this, Addr);
+        Address ArgSlot =
+            Builder.CreateStructGEP(ArgMemory, ArgInfo.getInAllocaFieldIndex());
+        Builder.CreateStore(Addr.getPointer(), ArgSlot);
       } else {
         // Store the RValue into the argument struct.
         Address Addr =
@@ -4763,6 +4809,9 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
   // we can't use the full cleanup mechanism.
   for (CallLifetimeEnd &LifetimeEnd : CallLifetimeEndAfterCall)
     LifetimeEnd.Emit(*this, /*Flags=*/{});
+
+  for (auto &LT : CallArgs.getLifetimeCleanups())
+    EmitLifetimeEnd(LT.Size, LT.Addr);
 
   return Ret;
 }

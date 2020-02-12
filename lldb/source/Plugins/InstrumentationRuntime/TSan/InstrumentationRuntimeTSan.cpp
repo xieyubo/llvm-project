@@ -35,6 +35,8 @@
 using namespace lldb;
 using namespace lldb_private;
 
+LLDB_PLUGIN(InstrumentationRuntimeTSan)
+
 lldb::InstrumentationRuntimeSP
 InstrumentationRuntimeTSan::CreateInstance(const lldb::ProcessSP &process_sp) {
   return InstrumentationRuntimeSP(new InstrumentationRuntimeTSan(process_sp));
@@ -564,8 +566,7 @@ static void GetSymbolDeclarationFromAddress(ProcessSP process_sp, addr_t addr,
   if (!symbol)
     return;
 
-  ConstString sym_name = symbol->GetMangled().GetName(
-      lldb::eLanguageTypeUnknown, Mangled::ePreferMangled);
+  ConstString sym_name = symbol->GetMangled().GetName(Mangled::ePreferMangled);
 
   ModuleSP module = symbol->CalculateSymbolContextModule();
   if (!module)

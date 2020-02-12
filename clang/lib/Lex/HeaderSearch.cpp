@@ -145,7 +145,7 @@ std::string HeaderSearch::getCachedModuleFileName(Module *Module) {
 std::string HeaderSearch::getPrebuiltModuleFileName(StringRef ModuleName,
                                                     bool FileMapOnly) {
   // First check the module name to pcm file map.
-  auto i(HSOpts->PrebuiltModuleFiles.find(std::string(ModuleName)));
+  auto i(HSOpts->PrebuiltModuleFiles.find(ModuleName));
   if (i != HSOpts->PrebuiltModuleFiles.end())
     return i->second;
 
@@ -159,7 +159,7 @@ std::string HeaderSearch::getPrebuiltModuleFileName(StringRef ModuleName,
     llvm::sys::fs::make_absolute(Result);
     llvm::sys::path::append(Result, ModuleName + ".pcm");
     if (getFileMgr().getFile(Result.str()))
-      return Result.str().str();
+      return std::string(Result);
   }
   return {};
 }

@@ -6147,6 +6147,14 @@ void OMPClauseWriter::VisitOMPCaptureClause(OMPCaptureClause *) {}
 
 void OMPClauseWriter::VisitOMPSeqCstClause(OMPSeqCstClause *) {}
 
+void OMPClauseWriter::VisitOMPAcqRelClause(OMPAcqRelClause *) {}
+
+void OMPClauseWriter::VisitOMPAcquireClause(OMPAcquireClause *) {}
+
+void OMPClauseWriter::VisitOMPReleaseClause(OMPReleaseClause *) {}
+
+void OMPClauseWriter::VisitOMPRelaxedClause(OMPRelaxedClause *) {}
+
 void OMPClauseWriter::VisitOMPThreadsClause(OMPThreadsClause *) {}
 
 void OMPClauseWriter::VisitOMPSIMDClause(OMPSIMDClause *) {}
@@ -6563,3 +6571,10 @@ void OMPClauseWriter::VisitOMPNontemporalClause(OMPNontemporalClause *C) {
   for (auto *E : C->private_refs())
     Record.AddStmt(E);
 }
+
+void OMPClauseWriter::VisitOMPOrderClause(OMPOrderClause *C) {
+  Record.writeEnum(C->getKind());
+  Record.AddSourceLocation(C->getLParenLoc());
+  Record.AddSourceLocation(C->getKindKwLoc());
+}
+
