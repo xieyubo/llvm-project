@@ -19,6 +19,7 @@
 #include "mlir/Conversion/GPUToNVVM/GPUToNVVMPass.h"
 #include "mlir/Conversion/GPUToROCDL/GPUToROCDLPass.h"
 #include "mlir/Conversion/GPUToSPIRV/ConvertGPUToSPIRVPass.h"
+#include "mlir/Conversion/GPUToVulkan/ConvertGPUToVulkanPass.h"
 #include "mlir/Conversion/LinalgToLLVM/LinalgToLLVM.h"
 #include "mlir/Conversion/LinalgToSPIRV/LinalgToSPIRVPass.h"
 #include "mlir/Conversion/LoopsToGPU/LoopsToGPUPass.h"
@@ -89,8 +90,10 @@ inline void registerAllPasses() {
 
   // CUDA
   createConvertGpuLaunchFuncToCudaCallsPass();
+#if MLIR_CUDA_CONVERSIONS_ENABLED
   createConvertGPUKernelToCubinPass(
       [](const std::string &, Location, StringRef) { return nullptr; });
+#endif
   createLowerGpuOpsToNVVMOpsPass();
 
   // Linalg
@@ -117,6 +120,9 @@ inline void registerAllPasses() {
   createConvertStandardToSPIRVPass();
   createLegalizeStdOpsForSPIRVLoweringPass();
   createLinalgToSPIRVPass();
+
+  // Vulkan
+  createConvertGpuLaunchFuncToVulkanCallsPass();
 }
 
 } // namespace mlir
