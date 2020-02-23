@@ -281,8 +281,8 @@ void ArgumentCommentCheck::checkCallArgs(ASTContext *Ctx,
           SmallString<256> StdStringFilePath = Path, StdioFilePath = Path;
           llvm::sys::path::append(StdStringFilePath, "string");
           llvm::sys::path::append(StdioFilePath, "stdio.h");
-          if (llvm::sys::fs::exists(StdStringFilePath) ||
-              llvm::sys::fs::exists(StdioFilePath)) {
+          if ((llvm::sys::fs::exists(StdStringFilePath) && llvm::sys::fs::is_regular_file(StdStringFilePath)) ||
+              (llvm::sys::fs::exists(StdioFilePath) && llvm::sys::fs::is_regular_file(StdioFilePath))) {
             // Find <string> or <stdio.h> in the same folder or
             // one of the parent folder. Assume the function is
             // declared in a standard library header file also.
