@@ -77,7 +77,7 @@ namespace llvm {
       NT_CALL,
 
       /// X86 compare and logical compare instructions.
-      CMP, COMI, UCOMI,
+      CMP, FCMP, COMI, UCOMI,
 
       /// X86 bit-test instructions.
       BT,
@@ -1150,7 +1150,8 @@ namespace llvm {
     /// Overflow nodes should get combined/lowered to optimal instructions
     /// (they should allow eliminating explicit compares by getting flags from
     /// math ops).
-    bool shouldFormOverflowOp(unsigned Opcode, EVT VT) const override;
+    bool shouldFormOverflowOp(unsigned Opcode, EVT VT,
+                              bool MathUsed) const override;
 
     bool storeOfVectorConstantIsCheap(EVT MemVT, unsigned NumElem,
                                       unsigned AddrSpace) const override {
@@ -1492,8 +1493,7 @@ namespace llvm {
     /// corresponding X86 condition code constant in X86CC.
     SDValue emitFlagsForSetcc(SDValue Op0, SDValue Op1, ISD::CondCode CC,
                               const SDLoc &dl, SelectionDAG &DAG,
-                              SDValue &X86CC, SDValue &Chain,
-                              bool IsSignaling) const;
+                              SDValue &X86CC) const;
 
     /// Check if replacement of SQRT with RSQRT should be disabled.
     bool isFsqrtCheap(SDValue Operand, SelectionDAG &DAG) const override;
