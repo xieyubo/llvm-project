@@ -15,7 +15,6 @@
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/InliningUtils.h"
-#include "mlir/Transforms/SideEffectsInterface.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallBitVector.h"
 #include "llvm/Support/Debug.h"
@@ -62,19 +61,6 @@ struct AffineInlinerInterface : public DialectInlinerInterface {
   /// Affine regions should be analyzed recursively.
   bool shouldAnalyzeRecursively(Operation *op) const final { return true; }
 };
-
-// TODO(mlir): Extend for other ops in this dialect.
-struct AffineSideEffectsInterface : public SideEffectsDialectInterface {
-  using SideEffectsDialectInterface::SideEffectsDialectInterface;
-
-  SideEffecting isSideEffecting(Operation *op) const override {
-    if (isa<AffineIfOp>(op)) {
-      return Recursive;
-    }
-    return SideEffectsDialectInterface::isSideEffecting(op);
-  };
-};
-
 } // end anonymous namespace
 
 //===----------------------------------------------------------------------===//
@@ -88,7 +74,7 @@ AffineOpsDialect::AffineOpsDialect(MLIRContext *context)
 #define GET_OP_LIST
 #include "mlir/Dialect/AffineOps/AffineOps.cpp.inc"
                 >();
-  addInterfaces<AffineInlinerInterface, AffineSideEffectsInterface>();
+  addInterfaces<AffineInlinerInterface>();
 }
 
 /// Materialize a single constant operation from a given attribute value with
@@ -536,8 +522,12 @@ AffineApplyNormalizer::AffineApplyNormalizer(AffineMap map,
           auxiliaryExprs.push_back(renumberOneDim(t));
         } else {
           // c. The mathematical composition of AffineMap concatenates symbols.
-          //    We do the same for symbol operands.
-          concatenatedSymbols.push_back(t);
+          //    Note that the map composition will put symbols already present
+          //    in the map before any symbols coming from the auxiliary map, so
+          //    we insert them before any symbols that are due to renumbering,
+          //    and after the proper symbols we have seen already.
+          concatenatedSymbols.insert(
+              std::next(concatenatedSymbols.begin(), numProperSymbols++), t);
         }
       }
     }
@@ -763,7 +753,9 @@ struct SimplifyAffineOp : public OpRewritePattern<AffineOpTy> {
     static_assert(std::is_same<AffineOpTy, AffineLoadOp>::value ||
                       std::is_same<AffineOpTy, AffinePrefetchOp>::value ||
                       std::is_same<AffineOpTy, AffineStoreOp>::value ||
-                      std::is_same<AffineOpTy, AffineApplyOp>::value,
+                      std::is_same<AffineOpTy, AffineApplyOp>::value ||
+                      std::is_same<AffineOpTy, AffineMinOp>::value ||
+                      std::is_same<AffineOpTy, AffineMaxOp>::value,
                   "affine load/store/apply op expected");
     auto map = affineOp.getAffineMap();
     AffineMap oldMap = map;
@@ -804,11 +796,13 @@ void SimplifyAffineOp<AffineStoreOp>::replaceAffineOp(
   rewriter.replaceOpWithNewOp<AffineStoreOp>(
       store, store.getValueToStore(), store.getMemRef(), map, mapOperands);
 }
-template <>
-void SimplifyAffineOp<AffineApplyOp>::replaceAffineOp(
-    PatternRewriter &rewriter, AffineApplyOp apply, AffineMap map,
+
+// Generic version for ops that don't have extra operands.
+template <typename AffineOpTy>
+void SimplifyAffineOp<AffineOpTy>::replaceAffineOp(
+    PatternRewriter &rewriter, AffineOpTy op, AffineMap map,
     ArrayRef<Value> mapOperands) const {
-  rewriter.replaceOpWithNewOp<AffineApplyOp>(apply, map, mapOperands);
+  rewriter.replaceOpWithNewOp<AffineOpTy>(op, map, mapOperands);
 }
 } // end anonymous namespace.
 
@@ -1613,9 +1607,8 @@ static LogicalResult verify(AffineIfOp op) {
         "symbol count must match");
 
   // Verify that the operands are valid dimension/symbols.
-  if (failed(verifyDimAndSymbolIdentifiers(
-          op, op.getOperation()->getNonSuccessorOperands(),
-          condition.getNumDims())))
+  if (failed(verifyDimAndSymbolIdentifiers(op, op.getOperands(),
+                                           condition.getNumDims())))
     return failure();
 
   // Verify that the entry of each child region does not have arguments.
@@ -2016,6 +2009,11 @@ OpFoldResult AffineMinOp::fold(ArrayRef<Attribute> operands) {
   return results[minIndex];
 }
 
+void AffineMinOp::getCanonicalizationPatterns(
+    OwningRewritePatternList &patterns, MLIRContext *context) {
+  patterns.insert<SimplifyAffineOp<AffineMinOp>>(context);
+}
+
 //===----------------------------------------------------------------------===//
 // AffineMaxOp
 //===----------------------------------------------------------------------===//
@@ -2044,6 +2042,11 @@ OpFoldResult AffineMaxOp::fold(ArrayRef<Attribute> operands) {
   if (maxIndex < 0)
     return {};
   return results[maxIndex];
+}
+
+void AffineMaxOp::getCanonicalizationPatterns(
+    OwningRewritePatternList &patterns, MLIRContext *context) {
+  patterns.insert<SimplifyAffineOp<AffineMaxOp>>(context);
 }
 
 //===----------------------------------------------------------------------===//

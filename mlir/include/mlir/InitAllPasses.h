@@ -109,6 +109,8 @@ inline void registerAllPasses() {
 
   // LoopOps
   createParallelLoopFusionPass();
+  createParallelLoopSpecializationPass();
+  createParallelLoopTilingPass();
 
   // QuantOps
   quant::createConvertSimulatedQuantPass();
@@ -126,7 +128,8 @@ inline void registerAllPasses() {
   createLinalgToSPIRVPass();
 
   // Vulkan
-  createConvertGpuLaunchFuncToVulkanCallsPass();
+  createConvertGpuLaunchFuncToVulkanLaunchFuncPass();
+  createConvertVulkanLaunchFuncToVulkanCallsPass();
 }
 
 } // namespace mlir

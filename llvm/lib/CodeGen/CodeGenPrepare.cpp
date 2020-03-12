@@ -399,7 +399,8 @@ class TypePromotionTransaction;
     bool simplifyOffsetableRelocate(Instruction &I);
 
     bool tryToSinkFreeOperands(Instruction *I);
-    bool replaceMathCmpWithIntrinsic(BinaryOperator *BO, CmpInst *Cmp,
+    bool replaceMathCmpWithIntrinsic(BinaryOperator *BO, Value *Arg0,
+                                     Value *Arg1, CmpInst *Cmp,
                                      Intrinsic::ID IID);
     bool optimizeCmp(CmpInst *Cmp, bool &ModifiedDT);
     bool combineToUSubWithOverflow(CmpInst *Cmp, bool &ModifiedDT);
@@ -1185,6 +1186,7 @@ static bool OptimizeNoopCopyExpression(CastInst *CI, const TargetLowering &TLI,
 }
 
 bool CodeGenPrepare::replaceMathCmpWithIntrinsic(BinaryOperator *BO,
+                                                 Value *Arg0, Value *Arg1,
                                                  CmpInst *Cmp,
                                                  Intrinsic::ID IID) {
   if (BO->getParent() != Cmp->getParent()) {
@@ -1202,8 +1204,6 @@ bool CodeGenPrepare::replaceMathCmpWithIntrinsic(BinaryOperator *BO,
   }
 
   // We allow matching the canonical IR (add X, C) back to (usubo X, -C).
-  Value *Arg0 = BO->getOperand(0);
-  Value *Arg1 = BO->getOperand(1);
   if (BO->getOpcode() == Instruction::Add &&
       IID == Intrinsic::usub_with_overflow) {
     assert(isa<Constant>(Arg1) && "Unexpected input for usubo");
@@ -1213,7 +1213,9 @@ bool CodeGenPrepare::replaceMathCmpWithIntrinsic(BinaryOperator *BO,
   // Insert at the first instruction of the pair.
   Instruction *InsertPt = nullptr;
   for (Instruction &Iter : *Cmp->getParent()) {
-    if (&Iter == BO || &Iter == Cmp) {
+    // If BO is an XOR, it is not guaranteed that it comes after both inputs to
+    // the overflow intrinsic are defined.
+    if ((BO->getOpcode() != Instruction::Xor && &Iter == BO) || &Iter == Cmp) {
       InsertPt = &Iter;
       break;
     }
@@ -1222,12 +1224,16 @@ bool CodeGenPrepare::replaceMathCmpWithIntrinsic(BinaryOperator *BO,
 
   IRBuilder<> Builder(InsertPt);
   Value *MathOV = Builder.CreateBinaryIntrinsic(IID, Arg0, Arg1);
-  Value *Math = Builder.CreateExtractValue(MathOV, 0, "math");
+  if (BO->getOpcode() != Instruction::Xor) {
+    Value *Math = Builder.CreateExtractValue(MathOV, 0, "math");
+    BO->replaceAllUsesWith(Math);
+  } else
+    assert(BO->hasOneUse() &&
+           "Patterns with XOr should use the BO only in the compare");
   Value *OV = Builder.CreateExtractValue(MathOV, 1, "ov");
-  BO->replaceAllUsesWith(Math);
   Cmp->replaceAllUsesWith(OV);
-  BO->eraseFromParent();
   Cmp->eraseFromParent();
+  BO->eraseFromParent();
   return true;
 }
 
@@ -1267,9 +1273,13 @@ bool CodeGenPrepare::combineToUAddWithOverflow(CmpInst *Cmp,
                                                bool &ModifiedDT) {
   Value *A, *B;
   BinaryOperator *Add;
-  if (!match(Cmp, m_UAddWithOverflow(m_Value(A), m_Value(B), m_BinOp(Add))))
+  if (!match(Cmp, m_UAddWithOverflow(m_Value(A), m_Value(B), m_BinOp(Add)))) {
     if (!matchUAddWithOverflowConstantEdgeCases(Cmp, Add))
       return false;
+    // Set A and B in case we match matchUAddWithOverflowConstantEdgeCases.
+    A = Add->getOperand(0);
+    B = Add->getOperand(1);
+  }
 
   if (!TLI->shouldFormOverflowOp(ISD::UADDO,
                                  TLI->getValueType(*DL, Add->getType()),
@@ -1282,7 +1292,8 @@ bool CodeGenPrepare::combineToUAddWithOverflow(CmpInst *Cmp,
   if (Add->getParent() != Cmp->getParent() && !Add->hasOneUse())
     return false;
 
-  if (!replaceMathCmpWithIntrinsic(Add, Cmp, Intrinsic::uadd_with_overflow))
+  if (!replaceMathCmpWithIntrinsic(Add, A, B, Cmp,
+                                   Intrinsic::uadd_with_overflow))
     return false;
 
   // Reset callers - do not crash by iterating over a dead instruction.
@@ -1344,7 +1355,8 @@ bool CodeGenPrepare::combineToUSubWithOverflow(CmpInst *Cmp,
                                  Sub->hasNUsesOrMore(2)))
     return false;
 
-  if (!replaceMathCmpWithIntrinsic(Sub, Cmp, Intrinsic::usub_with_overflow))
+  if (!replaceMathCmpWithIntrinsic(Sub, Sub->getOperand(0), Sub->getOperand(1),
+                                   Cmp, Intrinsic::usub_with_overflow))
     return false;
 
   // Reset callers - do not crash by iterating over a dead instruction.
@@ -2090,12 +2102,21 @@ bool CodeGenPrepare::dupRetToEnableTailCallOpts(BasicBlock *BB, bool &ModifiedDT
     return false;
 
   PHINode *PN = nullptr;
+  ExtractValueInst *EVI = nullptr;
   BitCastInst *BCI = nullptr;
   Value *V = RetI->getReturnValue();
   if (V) {
     BCI = dyn_cast<BitCastInst>(V);
     if (BCI)
       V = BCI->getOperand(0);
+
+    EVI = dyn_cast<ExtractValueInst>(V);
+    if (EVI) {
+      V = EVI->getOperand(0);
+      if (!std::all_of(EVI->idx_begin(), EVI->idx_end(),
+                       [](unsigned idx) { return idx == 0; }))
+        return false;
+    }
 
     PN = dyn_cast<PHINode>(V);
     if (!PN)
@@ -2110,7 +2131,9 @@ bool CodeGenPrepare::dupRetToEnableTailCallOpts(BasicBlock *BB, bool &ModifiedDT
   if (PN) {
     BasicBlock::iterator BI = BB->begin();
     // Skip over debug and the bitcast.
-    do { ++BI; } while (isa<DbgInfoIntrinsic>(BI) || &*BI == BCI);
+    do {
+      ++BI;
+    } while (isa<DbgInfoIntrinsic>(BI) || &*BI == BCI || &*BI == EVI);
     if (&*BI != RetI)
       return false;
   } else {
@@ -7164,6 +7187,26 @@ bool CodeGenPrepare::optimizeInst(Instruction *I, bool &ModifiedDT) {
     }
     if (tryUnmergingGEPsAcrossIndirectBr(GEPI, TTI)) {
       return true;
+    }
+    return false;
+  }
+
+  if (FreezeInst *FI = dyn_cast<FreezeInst>(I)) {
+    // br(freeze(icmp a, const)) -> br(icmp (freeze a), const)
+    // This helps generate efficient conditional jumps.
+    if (ICmpInst *II = dyn_cast<ICmpInst>(FI->getOperand(0))) {
+      auto Op0 = II->getOperand(0), Op1 = II->getOperand(1);
+      bool Const0 = isa<ConstantInt>(Op0), Const1 = isa<ConstantInt>(Op1);
+      if (II->hasOneUse() && (Const0 || Const1)) {
+        if (!Const0 || !Const1) {
+          auto *F = new FreezeInst(Const0 ? Op1 : Op0, "", II);
+          F->takeName(FI);
+          II->setOperand(Const0 ? 1 : 0, F);
+        }
+        FI->replaceAllUsesWith(II);
+        FI->eraseFromParent();
+        return true;
+      }
     }
     return false;
   }

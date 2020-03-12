@@ -525,7 +525,8 @@ template <class ELFT> void createSyntheticSections() {
     add(in.ibtPlt);
   }
 
-  in.plt = make<PltSection>();
+  in.plt = config->emachine == EM_PPC ? make<PPC32GlinkSection>()
+                                      : make<PltSection>();
   add(in.plt);
   in.iplt = make<IpltSection>();
   add(in.iplt);
@@ -594,6 +595,12 @@ template <class ELFT> void Writer<ELFT>::run() {
     for (OutputSection *sec : outputSections)
       sec->addr = 0;
 
+  // Handle --print-map(-M)/--Map and --cref. Dump them before checkSections()
+  // because the files may be useful in case checkSections() or openFile()
+  // fails, for example, due to an erroneous file size.
+  writeMapFile();
+  writeCrossReferenceTable();
+
   if (config->checkSections)
     checkSections();
 
@@ -617,12 +624,6 @@ template <class ELFT> void Writer<ELFT>::run() {
   // Backfill .note.gnu.build-id section content. This is done at last
   // because the content is usually a hash value of the entire output file.
   writeBuildId();
-  if (errorCount())
-    return;
-
-  // Handle -Map and -cref options.
-  writeMapFile();
-  writeCrossReferenceTable();
   if (errorCount())
     return;
 
@@ -1637,16 +1638,14 @@ template <class ELFT> void Writer<ELFT>::finalizeAddressDependentContent() {
     }
   }
 
-  // If a SECTIONS command is given, addrExpr, if set, is the specified output
-  // section address. Warn if the computed value is different from the actual
-  // address.
-  if (!script->hasSectionsCommand)
-    return;
-  for (auto changed : script->changedSectionAddresses) {
-    const OutputSection *os = changed.first;
-    warn("start of section " + os->name + " changes from 0x" +
-         utohexstr(changed.second) + " to 0x" + utohexstr(os->addr));
-  }
+  // If addrExpr is set, the address may not be a multiple of the alignment.
+  // Warn because this is error-prone.
+  for (BaseCommand *cmd : script->sectionCommands)
+    if (auto *os = dyn_cast<OutputSection>(cmd))
+      if (os->addr % os->alignment != 0)
+        warn("address (0x" + Twine::utohexstr(os->addr) + ") of section " +
+             os->name + " is not a multiple of alignment (" +
+             Twine(os->alignment) + ")");
 }
 
 static void finalizeSynthetic(SyntheticSection *sec) {
@@ -1678,12 +1677,15 @@ static void removeUnusedSyntheticSections() {
     if (!os || ss->isNeeded())
       continue;
 
-    // If we reach here, then SS is an unused synthetic section and we want to
-    // remove it from corresponding input section description of output section.
+    // If we reach here, then ss is an unused synthetic section and we want to
+    // remove it from the corresponding input section description, and
+    // orphanSections.
     for (BaseCommand *b : os->sectionCommands)
       if (auto *isd = dyn_cast<InputSectionDescription>(b))
         llvm::erase_if(isd->sections,
                        [=](InputSection *isec) { return isec == ss; });
+    llvm::erase_if(script->orphanSections,
+                   [=](const InputSectionBase *isec) { return isec == ss; });
   }
 }
 
@@ -1830,6 +1832,7 @@ template <class ELFT> void Writer<ELFT>::finalizeSections() {
     in.mipsGot->build();
 
   removeUnusedSyntheticSections();
+  script->diagnoseOrphanHandling();
 
   sortSections();
 
