@@ -286,16 +286,16 @@ TEST(FileIndexTest, RebuildWithPreamble) {
 
   FileIndex Index;
   bool IndexUpdated = false;
-  buildPreamble(
-      FooCpp, *CI, /*OldPreamble=*/nullptr, tooling::CompileCommand(), PI,
-      /*StoreInMemory=*/true,
-      [&](ASTContext &Ctx, std::shared_ptr<Preprocessor> PP,
-          const CanonicalIncludes &CanonIncludes) {
-        EXPECT_FALSE(IndexUpdated) << "Expected only a single index update";
-        IndexUpdated = true;
-        Index.updatePreamble(FooCpp, /*Version=*/"null", Ctx, std::move(PP),
-                             CanonIncludes);
-      });
+  buildPreamble(FooCpp, *CI, PI,
+                /*StoreInMemory=*/true,
+                [&](ASTContext &Ctx, std::shared_ptr<Preprocessor> PP,
+                    const CanonicalIncludes &CanonIncludes) {
+                  EXPECT_FALSE(IndexUpdated)
+                      << "Expected only a single index update";
+                  IndexUpdated = true;
+                  Index.updatePreamble(FooCpp, /*Version=*/"null", Ctx,
+                                       std::move(PP), CanonIncludes);
+                });
   ASSERT_TRUE(IndexUpdated);
 
   // Check the index contains symbols from the preamble, but not from the main
@@ -424,7 +424,7 @@ TEST(FileIndexTest, ReferencesInMainFileWithPreamble) {
 }
 
 TEST(FileIndexTest, MergeMainFileSymbols) {
-  const char* CommonHeader = "void foo();";
+  const char *CommonHeader = "void foo();";
   TestTU Header = TestTU::withCode(CommonHeader);
   TestTU Cpp = TestTU::withCode("void foo() {}");
   Cpp.Filename = "foo.cpp";

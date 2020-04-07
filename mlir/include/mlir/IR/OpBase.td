@@ -253,6 +253,23 @@ class Dialect {
   // the generated files are included into the dialect, you may want to specify
   // a full namespace path or a partial one.
   string cppNamespace = name;
+
+  // An optional code block containing extra declarations to place in the
+  // dialect declaration.
+  code extraClassDeclaration = "";
+
+  // If this dialect overrides the hook for materializing constants.
+  bit hasConstantMaterializer = 0;
+
+  // If this dialect overrides the hook for verifying operation attributes.
+  bit hasOperationAttrVerify = 0;
+
+  // If this dialect overrides the hook for verifying region argument
+  // attributes.
+  bit hasRegionArgAttrVerify = 0;
+
+  // If this dialect overrides the hook for verifying region result attributes.
+  bit hasRegionResultAttrVerify = 0;
 }
 
 //===----------------------------------------------------------------------===//
@@ -302,7 +319,8 @@ class BuildableType<code builder> {
 def AnyType : Type<CPred<"true">, "any type">;
 
 // None type
-def NoneType : Type<CPred<"$_self.isa<NoneType>()">, "none type">;
+def NoneType : Type<CPred<"$_self.isa<NoneType>()">, "none type">,
+      BuildableType<"$_builder.getType<NoneType>()">;
 
 // Any type from the given list
 class AnyTypeOf<list<Type> allowedTypes, string description = ""> : Type<
@@ -753,6 +771,12 @@ class Attr<Pred condition, string descr = ""> :
   Attr baseAttr = ?;
 }
 
+// An attribute of a specific dialect.
+class DialectAttr<Dialect d, Pred condition, string descr = ""> :
+    Attr<condition, descr> {
+  Dialect dialect = d;
+}
+
 //===----------------------------------------------------------------------===//
 // Attribute modifier definition
 
@@ -812,6 +836,7 @@ def AnyAttr : Attr<CPred<"true">, "any attribute"> {
 def BoolAttr : Attr<CPred<"$_self.isa<BoolAttr>()">, "bool attribute"> {
   let storageType = [{ BoolAttr }];
   let returnType = [{ bool }];
+  let valueType = I1;
   let constBuilderCall = "$_builder.getBoolAttr($0)";
 }
 
@@ -919,10 +944,17 @@ class StringBasedAttr<Pred condition, string descr> : Attr<condition, descr> {
   let constBuilderCall = "$_builder.getStringAttr(\"$0\")";
   let storageType = [{ StringAttr }];
   let returnType = [{ StringRef }];
+  let valueType = NoneType;
 }
 
 def StrAttr : StringBasedAttr<CPred<"$_self.isa<StringAttr>()">,
                               "string attribute">;
+
+// String attribute that has a specific value type.
+class TypedStrAttr<Type ty> : StringBasedAttr<CPred<"$_self.isa<StringAttr>()">,
+                                                    "string attribute"> {
+  let valueType = ty;
+}
 
 // Base class for attributes containing types. Example:
 //   def IntTypeAttr : TypeAttrBase<"IntegerType", "integer type attribute">
@@ -934,6 +966,7 @@ class TypeAttrBase<string retType, string description> :
     description> {
   let storageType = [{ TypeAttr }];
   let returnType = retType;
+  let valueType = NoneType;
   let convertFromStorage = "$_self.getValue().cast<" # retType # ">()";
 }
 
@@ -947,6 +980,7 @@ def UnitAttr : Attr<CPred<"$_self.isa<UnitAttr>()">, "unit attribute"> {
   let constBuilderCall = "$_builder.getUnitAttr()";
   let convertFromStorage = "$_self != nullptr";
   let returnType = "bool";
+  let valueType = NoneType;
   let isOptional = 1;
 }
 
@@ -1143,6 +1177,7 @@ class DictionaryAttrBase : Attr<CPred<"$_self.isa<DictionaryAttr>()">,
                           "dictionary of named attribute values"> {
   let storageType = [{ DictionaryAttr }];
   let returnType = [{ DictionaryAttr }];
+  let valueType = NoneType;
   let convertFromStorage = "$_self";
 }
 
@@ -1262,6 +1297,7 @@ class ArrayAttrBase<Pred condition, string description> :
     Attr<condition, description> {
   let storageType = [{ ArrayAttr }];
   let returnType = [{ ArrayAttr }];
+  let valueType = NoneType;
   let convertFromStorage = "$_self";
 }
 
@@ -1341,6 +1377,7 @@ def SymbolRefAttr : Attr<CPred<"$_self.isa<SymbolRefAttr>()">,
                         "symbol reference attribute"> {
   let storageType = [{ SymbolRefAttr }];
   let returnType = [{ SymbolRefAttr }];
+  let valueType = NoneType;
   let constBuilderCall = "$_builder.getSymbolRefAttr($0)";
   let convertFromStorage = "$_self";
 }
@@ -1348,6 +1385,7 @@ def FlatSymbolRefAttr : Attr<CPred<"$_self.isa<FlatSymbolRefAttr>()">,
                                    "flat symbol reference attribute"> {
   let storageType = [{ FlatSymbolRefAttr }];
   let returnType = [{ StringRef }];
+  let valueType = NoneType;
   let constBuilderCall = "$_builder.getSymbolRefAttr($0)";
   let convertFromStorage = "$_self.getValue()";
 }
@@ -1363,6 +1401,9 @@ def SymbolRefArrayAttr :
 // DerivedAttr are attributes whose value is computed from properties
 // of the operation. They do not require additional storage and are
 // materialized as needed.
+// Note: All derived attributes should be materializable as an Attribute. E.g.,
+// do not use DerivedAttr for things that could not have been stored as
+// Attribute.
 class DerivedAttr<code ret, code b> : Attr<CPred<"true">, "derived attribute"> {
   let returnType = ret;
   code body = b;
@@ -1492,6 +1533,10 @@ class SizedRegion<int numBlocks> : Region<
   CPred<"$_self.getBlocks().size() == " # numBlocks>,
   "region with " # numBlocks # " blocks">;
 
+// A variadic region constraint. It expands to zero or more of the base region.
+class VariadicRegion<Region region>
+  : Region<region.predicate, region.description>;
+
 //===----------------------------------------------------------------------===//
 // Successor definitions
 //===----------------------------------------------------------------------===//
@@ -1549,16 +1594,14 @@ def ResultsBroadcastableShape :
 def Broadcastable : NativeOpTrait<"ResultsBroadcastableShape">;
 // X op Y == Y op X
 def Commutative  : NativeOpTrait<"IsCommutative">;
+// Op behaves like a constant.
+def ConstantLike : NativeOpTrait<"ConstantLike">;
 // Op behaves like a function.
 def FunctionLike : NativeOpTrait<"FunctionLike">;
 // Op is isolated from above.
 def IsolatedFromAbove : NativeOpTrait<"IsIsolatedFromAbove">;
 // Op results are float or vectors/tensors thereof.
 def ResultsAreFloatLike : NativeOpTrait<"ResultsAreFloatLike">;
-// Op has no side effect.
-def NoSideEffect : NativeOpTrait<"HasNoSideEffect">;
-// Op has recursively computed side effects.
-def RecursiveSideEffects : NativeOpTrait<"HasRecursiveSideEffects">;
 // Op has the same operand type.
 def SameTypeOperands : NativeOpTrait<"SameTypeOperands">;
 // Op has same shape for all operands.

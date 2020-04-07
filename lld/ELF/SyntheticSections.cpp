@@ -2151,7 +2151,7 @@ template <class ELFT> void SymbolTableSection<ELFT>::writeTo(uint8_t *buf) {
       eSym->st_size = sym->getSize();
 
     // st_value is usually an address of a symbol, but that has a
-    // special meaining for uninstantiated common symbols (this can
+    // special meaning for uninstantiated common symbols (this can
     // occur if -r is given).
     if (BssSection *commonSec = getCommonSec(ent.sym))
       eSym->st_value = commonSec->alignment;
@@ -2250,7 +2250,7 @@ size_t SymtabShndxSection::getSize() const {
 // DSOs. That means resolving all dynamic symbols takes O(m)*O(n)
 // where m is the number of DSOs and n is the number of dynamic
 // symbols. For modern large programs, both m and n are large.  So
-// making each step faster by using hash tables substiantially
+// making each step faster by using hash tables substantially
 // improves time to load programs.
 //
 // (Note that this is not the only way to design the shared library.
@@ -2746,11 +2746,11 @@ createSymbols(ArrayRef<std::vector<GdbIndexSection::NameAttrEntry>> nameAttrs,
   // The number of symbols we will handle in this function is of the order
   // of millions for very large executables, so we use multi-threading to
   // speed it up.
-  size_t numShards = 32;
-  size_t concurrency = 1;
-  if (threadsEnabled)
-    concurrency = std::min<size_t>(
-        hardware_concurrency().compute_thread_count(), numShards);
+  constexpr size_t numShards = 32;
+  size_t concurrency = PowerOf2Floor(
+      std::min<size_t>(hardware_concurrency(parallel::strategy.ThreadsRequested)
+                           .compute_thread_count(),
+                       numShards));
 
   // A sharded map to uniquify symbols by name.
   std::vector<DenseMap<CachedHashStringRef, size_t>> map(numShards);
@@ -2822,14 +2822,16 @@ template <class ELFT> GdbIndexSection *GdbIndexSection::create() {
   std::vector<std::vector<NameAttrEntry>> nameAttrs(sections.size());
 
   parallelForEachN(0, sections.size(), [&](size_t i) {
-    DWARFContext *dwarf =
-        sections[i]->getFile<ELFT>()->getDwarf()->getContext();
+    // To keep memory usage low, we don't want to keep cached DWARFContext, so
+    // avoid getDwarf() here.
+    ObjFile<ELFT> *file = sections[i]->getFile<ELFT>();
+    DWARFContext dwarf(std::make_unique<LLDDwarfObj<ELFT>>(file));
 
     chunks[i].sec = sections[i];
-    chunks[i].compilationUnits = readCuList(*dwarf);
-    chunks[i].addressAreas = readAddressAreas(*dwarf, sections[i]);
+    chunks[i].compilationUnits = readCuList(dwarf);
+    chunks[i].addressAreas = readAddressAreas(dwarf, sections[i]);
     nameAttrs[i] = readPubNamesAndTypes<ELFT>(
-        static_cast<const LLDDwarfObj<ELFT> &>(dwarf->getDWARFObj()),
+        static_cast<const LLDDwarfObj<ELFT> &>(dwarf.getDWARFObj()),
         chunks[i].compilationUnits);
   });
 
@@ -3191,10 +3193,10 @@ void MergeNoTailSection::finalizeContents() {
 
   // Concurrency level. Must be a power of 2 to avoid expensive modulo
   // operations in the following tight loop.
-  size_t concurrency = 1;
-  if (threadsEnabled)
-    concurrency = std::min<size_t>(
-        hardware_concurrency().compute_thread_count(), numShards);
+  size_t concurrency = PowerOf2Floor(
+      std::min<size_t>(hardware_concurrency(parallel::strategy.ThreadsRequested)
+                           .compute_thread_count(),
+                       numShards));
 
   // Add section pieces to the builders.
   parallelForEachN(0, concurrency, [&](size_t threadId) {

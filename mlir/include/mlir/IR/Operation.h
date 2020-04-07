@@ -407,13 +407,6 @@ public:
     return false;
   }
 
-  /// Returns whether the operation has side-effects.
-  bool hasNoSideEffect() {
-    if (auto *absOp = getAbstractOperation())
-      return absOp->hasProperty(OperationProperty::NoSideEffect);
-    return false;
-  }
-
   /// Represents the status of whether an operation is a terminator. We
   /// represent an 'unknown' status because we want to support unregistered
   /// terminators.
@@ -612,7 +605,7 @@ private:
 };
 
 inline raw_ostream &operator<<(raw_ostream &os, Operation &op) {
-  op.print(os);
+  op.print(os, OpPrintingFlags().useLocalScope());
   return os;
 }
 

@@ -233,31 +233,6 @@ public:
   /// the EXT operation.
   int getExtCost(const Instruction *I, const Value *Src) const;
 
-  /// Estimate the cost of a function call when lowered.
-  ///
-  /// The contract for this is the same as \c getOperationCost except that it
-  /// supports an interface that provides extra information specific to call
-  /// instructions.
-  ///
-  /// This is the most basic query for estimating call cost: it only knows the
-  /// function type and (potentially) the number of arguments at the call site.
-  /// The latter is only interesting for varargs function types.
-  int getCallCost(FunctionType *FTy, int NumArgs = -1,
-                  const User *U = nullptr) const;
-
-  /// Estimate the cost of calling a specific function when lowered.
-  ///
-  /// This overload adds the ability to reason about the particular function
-  /// being called in the event it is a library call with special lowering.
-  int getCallCost(const Function *F, int NumArgs = -1,
-                  const User *U = nullptr) const;
-
-  /// Estimate the cost of calling a specific function when lowered.
-  ///
-  /// This overload allows specifying a set of candidate argument values.
-  int getCallCost(const Function *F, ArrayRef<const Value *> Arguments,
-                  const User *U = nullptr) const;
-
   /// \returns A value by which our inlining threshold should be multiplied.
   /// This is primarily used to bump up the inlining threshold wholesale on
   /// targets where calls are unusually expensive.
@@ -279,15 +254,11 @@ public:
   int getInlinerVectorBonusPercent() const;
 
   /// Estimate the cost of an intrinsic when lowered.
-  ///
-  /// Mirrors the \c getCallCost method but uses an intrinsic identifier.
   int getIntrinsicCost(Intrinsic::ID IID, Type *RetTy,
                        ArrayRef<Type *> ParamTys,
                        const User *U = nullptr) const;
 
   /// Estimate the cost of an intrinsic when lowered.
-  ///
-  /// Mirrors the \c getCallCost method but uses an intrinsic identifier.
   int getIntrinsicCost(Intrinsic::ID IID, Type *RetTy,
                        ArrayRef<const Value *> Arguments,
                        const User *U = nullptr) const;
@@ -873,16 +844,35 @@ public:
   /// instructions.
   unsigned getPrefetchDistance() const;
 
-  /// \return Some HW prefetchers can handle accesses up to a certain
-  /// constant stride.  This is the minimum stride in bytes where it
-  /// makes sense to start adding SW prefetches.  The default is 1,
-  /// i.e. prefetch with any stride.
-  unsigned getMinPrefetchStride() const;
+  /// Some HW prefetchers can handle accesses up to a certain constant stride.
+  /// Sometimes prefetching is beneficial even below the HW prefetcher limit,
+  /// and the arguments provided are meant to serve as a basis for deciding this
+  /// for a particular loop.
+  ///
+  /// \param NumMemAccesses        Number of memory accesses in the loop.
+  /// \param NumStridedMemAccesses Number of the memory accesses that
+  ///                              ScalarEvolution could find a known stride
+  ///                              for.
+  /// \param NumPrefetches         Number of software prefetches that will be
+  ///                              emitted as determined by the addresses
+  ///                              involved and the cache line size.
+  /// \param HasCall               True if the loop contains a call.
+  ///
+  /// \return This is the minimum stride in bytes where it makes sense to start
+  ///         adding SW prefetches. The default is 1, i.e. prefetch with any
+  ///         stride.
+  unsigned getMinPrefetchStride(unsigned NumMemAccesses,
+                                unsigned NumStridedMemAccesses,
+                                unsigned NumPrefetches,
+                                bool HasCall) const;
 
   /// \return The maximum number of iterations to prefetch ahead.  If
   /// the required number of iterations is more than this number, no
   /// prefetching is performed.
   unsigned getMaxPrefetchIterationsAhead() const;
+
+  /// \return True if prefetching should also be done for writes.
+  bool enableWritePrefetching() const;
 
   /// \return The maximum interleave factor that any transform should try to
   /// perform for this target. This number depends on the level of parallelism
@@ -1069,6 +1059,7 @@ public:
 
   /// \returns The type to use in a loop expansion of a memcpy call.
   Type *getMemcpyLoopLoweringType(LLVMContext &Context, Value *Length,
+                                  unsigned SrcAddrSpace, unsigned DestAddrSpace,
                                   unsigned SrcAlign, unsigned DestAlign) const;
 
   /// \param[out] OpsOut The operand types to copy RemainingBytes of memory.
@@ -1080,6 +1071,8 @@ public:
   void getMemcpyLoopResidualLoweringType(SmallVectorImpl<Type *> &OpsOut,
                                          LLVMContext &Context,
                                          unsigned RemainingBytes,
+                                         unsigned SrcAddrSpace,
+                                         unsigned DestAddrSpace,
                                          unsigned SrcAlign,
                                          unsigned DestAlign) const;
 
@@ -1164,6 +1157,15 @@ public:
   /// to a stack reload.
   unsigned getGISelRematGlobalCost() const;
 
+  /// \name Vector Predication Information
+  /// @{
+  /// Whether the target supports the %evl parameter of VP intrinsic efficiently in hardware.
+  /// (see LLVM Language Reference - "Vector Predication Intrinsics")
+  /// Use of %evl is discouraged when that is not the case.
+  bool hasActiveVectorLength() const;
+
+  /// @}
+
   /// @}
 
 private:
@@ -1194,10 +1196,6 @@ public:
   virtual int getGEPCost(Type *PointeeType, const Value *Ptr,
                          ArrayRef<const Value *> Operands) = 0;
   virtual int getExtCost(const Instruction *I, const Value *Src) = 0;
-  virtual int getCallCost(FunctionType *FTy, int NumArgs, const User *U) = 0;
-  virtual int getCallCost(const Function *F, int NumArgs, const User *U) = 0;
-  virtual int getCallCost(const Function *F,
-                          ArrayRef<const Value *> Arguments, const User *U) = 0;
   virtual unsigned getInliningThresholdMultiplier() = 0;
   virtual int getInlinerVectorBonusPercent() = 0;
   virtual int getIntrinsicCost(Intrinsic::ID IID, Type *RetTy,
@@ -1319,13 +1317,21 @@ public:
   /// \return Some HW prefetchers can handle accesses up to a certain
   /// constant stride.  This is the minimum stride in bytes where it
   /// makes sense to start adding SW prefetches.  The default is 1,
-  /// i.e. prefetch with any stride.
-  virtual unsigned getMinPrefetchStride() const = 0;
+  /// i.e. prefetch with any stride.  Sometimes prefetching is beneficial
+  /// even below the HW prefetcher limit, and the arguments provided are
+  /// meant to serve as a basis for deciding this for a particular loop.
+  virtual unsigned getMinPrefetchStride(unsigned NumMemAccesses,
+                                        unsigned NumStridedMemAccesses,
+                                        unsigned NumPrefetches,
+                                        bool HasCall) const = 0;
 
   /// \return The maximum number of iterations to prefetch ahead.  If
   /// the required number of iterations is more than this number, no
   /// prefetching is performed.
   virtual unsigned getMaxPrefetchIterationsAhead() const = 0;
+
+  /// \return True if prefetching should also be done for writes.
+  virtual bool enableWritePrefetching() const = 0;
 
   virtual unsigned getMaxInterleaveFactor(unsigned VF) = 0;
   virtual unsigned getArithmeticInstrCost(
@@ -1382,11 +1388,15 @@ public:
   virtual Value *getOrCreateResultFromMemIntrinsic(IntrinsicInst *Inst,
                                                    Type *ExpectedType) = 0;
   virtual Type *getMemcpyLoopLoweringType(LLVMContext &Context, Value *Length,
+                                          unsigned SrcAddrSpace,
+                                          unsigned DestAddrSpace,
                                           unsigned SrcAlign,
                                           unsigned DestAlign) const = 0;
   virtual void getMemcpyLoopResidualLoweringType(
       SmallVectorImpl<Type *> &OpsOut, LLVMContext &Context,
-      unsigned RemainingBytes, unsigned SrcAlign, unsigned DestAlign) const = 0;
+      unsigned RemainingBytes,
+      unsigned SrcAddrSpace, unsigned DestAddrSpace,
+      unsigned SrcAlign, unsigned DestAlign) const = 0;
   virtual bool areInlineCompatible(const Function *Caller,
                                    const Function *Callee) const = 0;
   virtual bool
@@ -1413,6 +1423,7 @@ public:
                                      ReductionFlags) const = 0;
   virtual bool shouldExpandReduction(const IntrinsicInst *II) const = 0;
   virtual unsigned getGISelRematGlobalCost() const = 0;
+  virtual bool hasActiveVectorLength() const = 0;
   virtual int getInstructionLatency(const Instruction *I) = 0;
 };
 
@@ -1437,16 +1448,6 @@ public:
   }
   int getExtCost(const Instruction *I, const Value *Src) override {
     return Impl.getExtCost(I, Src);
-  }
-  int getCallCost(FunctionType *FTy, int NumArgs, const User *U) override {
-    return Impl.getCallCost(FTy, NumArgs, U);
-  }
-  int getCallCost(const Function *F, int NumArgs, const User *U) override {
-    return Impl.getCallCost(F, NumArgs, U);
-  }
-  int getCallCost(const Function *F,
-                  ArrayRef<const Value *> Arguments, const User *U) override {
-    return Impl.getCallCost(F, Arguments, U);
   }
   unsigned getInliningThresholdMultiplier() override {
     return Impl.getInliningThresholdMultiplier();
@@ -1710,8 +1711,12 @@ public:
   /// Return the minimum stride necessary to trigger software
   /// prefetching.
   ///
-  unsigned getMinPrefetchStride() const override {
-    return Impl.getMinPrefetchStride();
+  unsigned getMinPrefetchStride(unsigned NumMemAccesses,
+                                unsigned NumStridedMemAccesses,
+                                unsigned NumPrefetches,
+                                bool HasCall) const override {
+    return Impl.getMinPrefetchStride(NumMemAccesses, NumStridedMemAccesses,
+                                     NumPrefetches, HasCall);
   }
 
   /// Return the maximum prefetch distance in terms of loop
@@ -1719,6 +1724,11 @@ public:
   ///
   unsigned getMaxPrefetchIterationsAhead() const override {
     return Impl.getMaxPrefetchIterationsAhead();
+  }
+
+  /// \return True if prefetching should also be done for writes.
+  bool enableWritePrefetching() const override {
+    return Impl.enableWritePrefetching();
   }
 
   unsigned getMaxInterleaveFactor(unsigned VF) override {
@@ -1830,16 +1840,22 @@ public:
     return Impl.getOrCreateResultFromMemIntrinsic(Inst, ExpectedType);
   }
   Type *getMemcpyLoopLoweringType(LLVMContext &Context, Value *Length,
+                                  unsigned SrcAddrSpace, unsigned DestAddrSpace,
                                   unsigned SrcAlign,
                                   unsigned DestAlign) const override {
-    return Impl.getMemcpyLoopLoweringType(Context, Length, SrcAlign, DestAlign);
+    return Impl.getMemcpyLoopLoweringType(Context, Length,
+                                          SrcAddrSpace, DestAddrSpace,
+                                          SrcAlign, DestAlign);
   }
   void getMemcpyLoopResidualLoweringType(SmallVectorImpl<Type *> &OpsOut,
                                          LLVMContext &Context,
                                          unsigned RemainingBytes,
+                                         unsigned SrcAddrSpace,
+                                         unsigned DestAddrSpace,
                                          unsigned SrcAlign,
                                          unsigned DestAlign) const override {
     Impl.getMemcpyLoopResidualLoweringType(OpsOut, Context, RemainingBytes,
+                                           SrcAddrSpace, DestAddrSpace,
                                            SrcAlign, DestAlign);
   }
   bool areInlineCompatible(const Function *Caller,
@@ -1898,6 +1914,10 @@ public:
 
   unsigned getGISelRematGlobalCost() const override {
     return Impl.getGISelRematGlobalCost();
+  }
+
+  bool hasActiveVectorLength() const override {
+    return Impl.hasActiveVectorLength();
   }
 
   int getInstructionLatency(const Instruction *I) override {

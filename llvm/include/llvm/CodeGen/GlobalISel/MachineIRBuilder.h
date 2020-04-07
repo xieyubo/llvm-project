@@ -379,7 +379,14 @@ public:
   ///
   /// \return a MachineInstrBuilder for the newly created instruction.
   MachineInstrBuilder buildDynStackAlloc(const DstOp &Res, const SrcOp &Size,
-                                         unsigned Align);
+                                         Align Alignment);
+
+  LLVM_ATTRIBUTE_DEPRECATED(inline MachineInstrBuilder buildDynStackAlloc(
+                                const DstOp &Res, const SrcOp &Size,
+                                unsigned Align),
+                            "Use the version that takes MaybeAlign instead") {
+    return buildDynStackAlloc(Res, Size, assumeAligned(Align));
+  }
 
   /// Build and insert \p Res = G_FRAME_INDEX \p Idx
   ///
@@ -1444,6 +1451,11 @@ public:
   /// Build and insert \p Res = G_CTTZ_ZERO_UNDEF \p Op0, \p Src0
   MachineInstrBuilder buildCTTZ_ZERO_UNDEF(const DstOp &Dst, const SrcOp &Src0) {
     return buildInstr(TargetOpcode::G_CTTZ_ZERO_UNDEF, {Dst}, {Src0});
+  }
+
+  /// Build and insert \p Dst = G_BSWAP \p Src0
+  MachineInstrBuilder buildBSwap(const DstOp &Dst, const SrcOp &Src0) {
+    return buildInstr(TargetOpcode::G_BSWAP, {Dst}, {Src0});
   }
 
   /// Build and insert \p Res = G_FADD \p Op0, \p Op1

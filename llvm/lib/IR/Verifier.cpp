@@ -1034,6 +1034,9 @@ void Verifier::visitDIFile(const DIFile &N) {
     case DIFile::CSK_SHA1:
       Size = 40;
       break;
+    case DIFile::CSK_SHA256:
+      Size = 64;
+      break;
     }
     AssertDI(Checksum->Value.size() == Size, "invalid checksum length", &N);
     AssertDI(Checksum->Value.find_if_not(llvm::isHexDigit) == StringRef::npos,
@@ -2382,11 +2385,14 @@ void Verifier::visitFunction(const Function &F) {
     AssertDI(Parent && isa<DILocalScope>(Parent),
              "DILocation's scope must be a DILocalScope", N, &F, &I, DL,
              Parent);
+
     DILocalScope *Scope = DL->getInlinedAtScope();
-    if (Scope && !Seen.insert(Scope).second)
+    Assert(Scope, "Failed to find DILocalScope", DL);
+
+    if (!Seen.insert(Scope).second)
       return;
 
-    DISubprogram *SP = Scope ? Scope->getSubprogram() : nullptr;
+    DISubprogram *SP = Scope->getSubprogram();
 
     // Scope and SP could be the same MDNode and we don't want to skip
     // validation in that case
@@ -3070,15 +3076,16 @@ static bool isTypeCongruent(Type *L, Type *R) {
 
 static AttrBuilder getParameterABIAttributes(int I, AttributeList Attrs) {
   static const Attribute::AttrKind ABIAttrs[] = {
-      Attribute::StructRet, Attribute::ByVal, Attribute::InAlloca,
-      Attribute::InReg, Attribute::Returned, Attribute::SwiftSelf,
-      Attribute::SwiftError};
+      Attribute::StructRet, Attribute::ByVal,     Attribute::InAlloca,
+      Attribute::InReg,     Attribute::SwiftSelf, Attribute::SwiftError};
   AttrBuilder Copy;
   for (auto AK : ABIAttrs) {
     if (Attrs.hasParamAttribute(I, AK))
       Copy.addAttribute(AK);
   }
-  if (Attrs.hasParamAttribute(I, Attribute::Alignment))
+  // `align` is ABI-affecting only in combination with `byval`.
+  if (Attrs.hasParamAttribute(I, Attribute::Alignment) &&
+      Attrs.hasParamAttribute(I, Attribute::ByVal))
     Copy.addAlignmentAttr(Attrs.getParamAlignment(I));
   return Copy;
 }
@@ -3302,7 +3309,7 @@ void Verifier::visitInsertElementInst(InsertElementInst &IE) {
 
 void Verifier::visitShuffleVectorInst(ShuffleVectorInst &SV) {
   Assert(ShuffleVectorInst::isValidOperands(SV.getOperand(0), SV.getOperand(1),
-                                            SV.getOperand(2)),
+                                            SV.getShuffleMask()),
          "Invalid shufflevector operands!", &SV);
   visitInstruction(SV);
 }
@@ -4409,15 +4416,6 @@ void Verifier::visitIntrinsicCall(Intrinsic::ID ID, CallBase &Call) {
            "must be a power of 2",
            Call);
 
-    if (auto *LengthCI = dyn_cast<ConstantInt>(AMI->getLength())) {
-      uint64_t Length = LengthCI->getZExtValue();
-      uint64_t ElementSize = AMI->getElementSizeInBytes();
-      Assert((Length % ElementSize) == 0,
-             "constant length must be a multiple of the element size in the "
-             "element-wise atomic memory intrinsic",
-             Call);
-    }
-
     auto IsValidAlignment = [&](uint64_t Alignment) {
       return isPowerOf2_64(Alignment) && ElementSizeVal.ule(Alignment);
     };
@@ -4784,6 +4782,48 @@ void Verifier::visitIntrinsicCall(Intrinsic::ID ID, CallBase &Call) {
     Type *ResultTy = Call.getType();
     Assert(!ValTy->isVectorTy() && !ResultTy->isVectorTy(),
            "Intrinsic does not support vectors", &Call);
+    break;
+  }
+  case Intrinsic::bswap: {
+    Type *Ty = Call.getType();
+    unsigned Size = Ty->getScalarSizeInBits();
+    Assert(Size % 16 == 0, "bswap must be an even number of bytes", &Call);
+    break;
+  }
+  case Intrinsic::matrix_multiply:
+  case Intrinsic::matrix_transpose:
+  case Intrinsic::matrix_columnwise_load:
+  case Intrinsic::matrix_columnwise_store: {
+    ConstantInt *NumRows;
+    ConstantInt *NumColumns;
+    VectorType *TypeToCheck;
+    switch (ID) {
+    case Intrinsic::matrix_multiply:
+      NumRows = cast<ConstantInt>(Call.getArgOperand(2));
+      NumColumns = cast<ConstantInt>(Call.getArgOperand(4));
+      TypeToCheck = cast<VectorType>(Call.getType());
+      break;
+    case Intrinsic::matrix_transpose:
+      NumRows = cast<ConstantInt>(Call.getArgOperand(1));
+      NumColumns = cast<ConstantInt>(Call.getArgOperand(2));
+      TypeToCheck = cast<VectorType>(Call.getType());
+      break;
+    case Intrinsic::matrix_columnwise_load:
+      NumRows = cast<ConstantInt>(Call.getArgOperand(2));
+      NumColumns = cast<ConstantInt>(Call.getArgOperand(3));
+      TypeToCheck = cast<VectorType>(Call.getType());
+      break;
+    case Intrinsic::matrix_columnwise_store:
+      NumRows = cast<ConstantInt>(Call.getArgOperand(3));
+      NumColumns = cast<ConstantInt>(Call.getArgOperand(4));
+      TypeToCheck = cast<VectorType>(Call.getArgOperand(0)->getType());
+      break;
+    default:
+      llvm_unreachable("unexpected intrinsic");
+    }
+    Assert(TypeToCheck->getNumElements() ==
+               NumRows->getZExtValue() * NumColumns->getZExtValue(),
+           "result of a matrix operation does not fit in the returned vector");
     break;
   }
   };

@@ -401,16 +401,19 @@ void OpEmitter::genAttrGetters() {
   // Generate helper method to query whether a named attribute is a derived
   // attribute. This enables, for example, avoiding adding an attribute that
   // overlaps with a derived attribute.
-  auto &method =
-      opClass.newMethod("bool", "isDerivedAttribute", "StringRef name");
-  auto &body = method.body();
   auto derivedAttr = make_filter_range(op.getAttributes(),
                                        [](const NamedAttribute &namedAttr) {
                                          return namedAttr.attr.isDerivedAttr();
                                        });
-  for (auto namedAttr : derivedAttr)
-    body << "    if (name == \"" << namedAttr.name << "\") return true;\n";
-  body << " return false;";
+  if (!derivedAttr.empty()) {
+    opClass.addTrait("DerivedAttributeOpInterface::Trait");
+    auto &method = opClass.newMethod("bool", "isDerivedAttribute",
+                                     "StringRef name", OpMethod::MP_Static);
+    auto &body = method.body();
+    for (auto namedAttr : derivedAttr)
+      body << "    if (name == \"" << namedAttr.name << "\") return true;\n";
+    body << " return false;";
+  }
 }
 
 void OpEmitter::genAttrSetters() {
@@ -600,10 +603,19 @@ void OpEmitter::genNamedRegionGetters() {
   unsigned numRegions = op.getNumRegions();
   for (unsigned i = 0; i < numRegions; ++i) {
     const auto &region = op.getRegion(i);
-    if (!region.name.empty()) {
-      auto &m = opClass.newMethod("Region &", region.name);
-      m.body() << formatv("  return this->getOperation()->getRegion({0});", i);
+    if (region.name.empty())
+      continue;
+
+    // Generate the accessors for a varidiadic region.
+    if (region.isVariadic()) {
+      auto &m = opClass.newMethod("MutableArrayRef<Region>", region.name);
+      m.body() << formatv(
+          "  return this->getOperation()->getRegions().drop_front({0});", i);
+      continue;
     }
+
+    auto &m = opClass.newMethod("Region &", region.name);
+    m.body() << formatv("  return this->getOperation()->getRegion({0});", i);
   }
 }
 
@@ -699,6 +711,11 @@ void OpEmitter::genSeparateArgParamBuilder() {
       }
       return;
     case TypeParamKind::Collective:
+      body << "  "
+           << "assert(resultTypes.size() "
+           << (op.getNumVariadicResults() == 0 ? "==" : ">=") << " "
+           << (op.getNumResults() - op.getNumVariadicResults())
+           << "u && \"mismatched number of results\");\n";
       body << "  " << builderOpState << ".addTypes(resultTypes);\n";
       return;
     };
@@ -731,6 +748,8 @@ void OpEmitter::genUseOperandAsResultTypeCollectiveParamBuilder() {
   std::string params =
       std::string("Builder *odsBuilder, OperationState &") + builderOpState +
       ", ValueRange operands, ArrayRef<NamedAttribute> attributes";
+  if (op.getNumVariadicRegions())
+    params += ", unsigned numRegions";
   auto &m = opClass.newMethod("void", "build", params, OpMethod::MP_Static);
   auto &body = m.body();
 
@@ -742,8 +761,10 @@ void OpEmitter::genUseOperandAsResultTypeCollectiveParamBuilder() {
 
   // Create the correct number of regions
   if (int numRegions = op.getNumRegions()) {
-    for (int i = 0; i < numRegions; ++i)
-      m.body() << "  (void)" << builderOpState << ".addRegion();\n";
+    body << llvm::formatv(
+        "  for (unsigned i = 0; i != {0}; ++i)\n",
+        (op.getNumVariadicRegions() ? "numRegions" : Twine(numRegions)));
+    body << "    (void)" << builderOpState << ".addRegion();\n";
   }
 
   // Result types
@@ -889,6 +910,8 @@ void OpEmitter::genCollectiveParamBuilder() {
                        builderOpState +
                        ", ArrayRef<Type> resultTypes, ValueRange operands, "
                        "ArrayRef<NamedAttribute> attributes";
+  if (op.getNumVariadicRegions())
+    params += ", unsigned numRegions";
   auto &m = opClass.newMethod("void", "build", params, OpMethod::MP_Static);
   auto &body = m.body();
 
@@ -905,8 +928,10 @@ void OpEmitter::genCollectiveParamBuilder() {
 
   // Create the correct number of regions
   if (int numRegions = op.getNumRegions()) {
-    for (int i = 0; i < numRegions; ++i)
-      m.body() << "  (void)" << builderOpState << ".addRegion();\n";
+    body << llvm::formatv(
+        "  for (unsigned i = 0; i != {0}; ++i)\n",
+        (op.getNumVariadicRegions() ? "numRegions" : Twine(numRegions)));
+    body << "    (void)" << builderOpState << ".addRegion();\n";
   }
 
   // Result types
@@ -1034,10 +1059,16 @@ void OpEmitter::buildParamList(std::string &paramList,
     }
   }
 
-  /// Insert parameters for the block and operands for each successor.
+  /// Insert parameters for each successor.
   for (const NamedSuccessor &succ : op.getSuccessors()) {
     paramList += (succ.isVariadic() ? ", ArrayRef<Block *> " : ", Block *");
     paramList += succ.name;
+  }
+
+  /// Insert parameters for variadic regions.
+  for (const NamedRegion &region : op.getRegions()) {
+    if (region.isVariadic())
+      paramList += llvm::formatv(", unsigned {0}Count", region.name).str();
   }
 }
 
@@ -1102,9 +1133,12 @@ void OpEmitter::genCodeForAddingArgAndRegionForBuilder(OpMethodBody &body,
   }
 
   // Create the correct number of regions.
-  if (int numRegions = op.getNumRegions()) {
-    for (int i = 0; i < numRegions; ++i)
-      body << "  (void)" << builderOpState << ".addRegion();\n";
+  for (const NamedRegion &region : op.getRegions()) {
+    if (region.isVariadic())
+      body << formatv("  for (unsigned i = 0; i < {0}Count; ++i)\n  ",
+                      region.name);
+
+    body << "  (void)" << builderOpState << ".addRegion();\n";
   }
 
   // Push all successors to the result.
@@ -1184,15 +1218,21 @@ void OpEmitter::genSideEffectInterfaceMethods() {
                                unsigned index, unsigned kind) {
     for (auto decorator : decorators)
       if (SideEffect *effect = dyn_cast<SideEffect>(&decorator))
-        interfaceEffects[effect->getInterfaceTrait()].push_back(
+        interfaceEffects[effect->getBaseEffectName()].push_back(
             EffectLocation{*effect, index, kind});
   };
 
   // Collect effects that were specified via:
   /// Traits.
-  for (const auto &trait : op.getTraits())
-    if (const auto *opTrait = dyn_cast<tblgen::SideEffectTrait>(&trait))
-      resolveDecorators(opTrait->getEffects(), /*index=*/0, EffectKind::Static);
+  for (const auto &trait : op.getTraits()) {
+    const auto *opTrait = dyn_cast<tblgen::SideEffectTrait>(&trait);
+    if (!opTrait)
+      continue;
+    auto &effects = interfaceEffects[opTrait->getBaseEffectName()];
+    for (auto decorator : opTrait->getEffects())
+      effects.push_back(EffectLocation{cast<SideEffect>(decorator),
+                                       /*index=*/0, EffectKind::Static});
+  }
   /// Operands.
   for (unsigned i = 0, operandIt = 0, e = op.getNumArgs(); i != e; ++i) {
     if (op.getArg(i).is<NamedTypeConstraint *>()) {
@@ -1205,11 +1245,10 @@ void OpEmitter::genSideEffectInterfaceMethods() {
     resolveDecorators(op.getResultDecorators(i), i, EffectKind::Result);
 
   for (auto &it : interfaceEffects) {
-    StringRef baseEffect = it.second.front().effect.getBaseName();
     auto effectsParam =
         llvm::formatv(
             "SmallVectorImpl<SideEffects::EffectInstance<{0}>> &effects",
-            baseEffect)
+            it.first())
             .str();
 
     // Generate the 'getEffects' method.
@@ -1423,33 +1462,42 @@ void OpEmitter::genOperandResultVerifier(OpMethodBody &body,
 }
 
 void OpEmitter::genRegionVerifier(OpMethodBody &body) {
+  // If we have no regions, there is nothing more to do.
   unsigned numRegions = op.getNumRegions();
+  if (numRegions == 0)
+    return;
 
-  // Verify this op has the correct number of regions
-  body << formatv(
-      "  if (this->getOperation()->getNumRegions() != {0}) {\n    "
-      "return emitOpError(\"has incorrect number of regions: expected {0} but "
-      "found \") << this->getOperation()->getNumRegions();\n  }\n",
-      numRegions);
+  body << "{\n";
+  body << "    unsigned index = 0; (void)index;\n";
 
   for (unsigned i = 0; i < numRegions; ++i) {
     const auto &region = op.getRegion(i);
+    if (region.constraint.getPredicate().isNull())
+      continue;
 
-    std::string name = std::string(formatv("#{0}", i));
-    if (!region.name.empty()) {
-      name += std::string(formatv(" ('{0}')", region.name));
-    }
-
-    auto getRegion = formatv("this->getOperation()->getRegion({0})", i).str();
+    body << "    for (Region &region : ";
+    body << formatv(
+        region.isVariadic()
+            ? "{0}()"
+            : "MutableArrayRef<Region>(this->getOperation()->getRegion({1}))",
+        region.name, i);
+    body << ") {\n";
     auto constraint = tgfmt(region.constraint.getConditionTemplate(),
-                            &verifyCtx.withSelf(getRegion))
+                            &verifyCtx.withSelf("region"))
                           .str();
 
-    body << formatv("  if (!({0})) {\n    "
-                    "return emitOpError(\"region {1} failed to verify "
-                    "constraint: {2}\");\n  }\n",
-                    constraint, name, region.constraint.getDescription());
+    body << formatv("      (void)region;\n"
+                    "      if (!({0})) {\n        "
+                    "return emitOpError(\"region #\") << index << \" {1}"
+                    "failed to "
+                    "verify constraint: {2}\";\n      }\n",
+                    constraint,
+                    region.name.empty() ? "" : "('" + region.name + "') ",
+                    region.constraint.getDescription())
+         << "      ++index;\n"
+         << "    }\n";
   }
+  body << "  }\n";
 }
 
 void OpEmitter::genSuccessorVerifier(OpMethodBody &body) {
@@ -1475,29 +1523,31 @@ void OpEmitter::genSuccessorVerifier(OpMethodBody &body) {
                             &verifyCtx.withSelf("successor"))
                           .str();
 
-    body << formatv(
-        "      (void)successor;\n"
-        "      if (!({0})) {\n        "
-        "return emitOpError(\"successor #\") << index << \"('{2}') failed to "
-        "verify constraint: {3}\";\n      }\n",
-        constraint, i, successor.name, successor.constraint.getDescription());
-    body << "    }\n";
+    body << formatv("      (void)successor;\n"
+                    "      if (!({0})) {\n        "
+                    "return emitOpError(\"successor #\") << index << \"('{1}') "
+                    "failed to "
+                    "verify constraint: {2}\";\n      }\n",
+                    constraint, successor.name,
+                    successor.constraint.getDescription())
+         << "      ++index;\n"
+         << "    }\n";
   }
   body << "  }\n";
 }
 
 /// Add a size count trait to the given operation class.
 static void addSizeCountTrait(OpClass &opClass, StringRef traitKind,
-                              int numNonVariadic, int numVariadic) {
+                              int numTotal, int numVariadic) {
   if (numVariadic != 0) {
-    if (numNonVariadic == numVariadic)
+    if (numTotal == numVariadic)
       opClass.addTrait("OpTrait::Variadic" + traitKind + "s");
     else
       opClass.addTrait("OpTrait::AtLeastN" + traitKind + "s<" +
-                       Twine(numNonVariadic - numVariadic) + ">::Impl");
+                       Twine(numTotal - numVariadic) + ">::Impl");
     return;
   }
-  switch (numNonVariadic) {
+  switch (numTotal) {
   case 0:
     opClass.addTrait("OpTrait::Zero" + traitKind);
     break;
@@ -1505,31 +1555,27 @@ static void addSizeCountTrait(OpClass &opClass, StringRef traitKind,
     opClass.addTrait("OpTrait::One" + traitKind);
     break;
   default:
-    opClass.addTrait("OpTrait::N" + traitKind + "s<" + Twine(numNonVariadic) +
+    opClass.addTrait("OpTrait::N" + traitKind + "s<" + Twine(numTotal) +
                      ">::Impl");
     break;
   }
 }
 
 void OpEmitter::genTraits() {
+  // Add region size trait.
+  unsigned numRegions = op.getNumRegions();
+  unsigned numVariadicRegions = op.getNumVariadicRegions();
+  addSizeCountTrait(opClass, "Region", numRegions, numVariadicRegions);
+
+  // Add result size trait.
   int numResults = op.getNumResults();
   int numVariadicResults = op.getNumVariadicResults();
-
-  // Add return size trait.
   addSizeCountTrait(opClass, "Result", numResults, numVariadicResults);
 
   // Add successor size trait.
   unsigned numSuccessors = op.getNumSuccessors();
   unsigned numVariadicSuccessors = op.getNumVariadicSuccessors();
   addSizeCountTrait(opClass, "Successor", numSuccessors, numVariadicSuccessors);
-
-  // Add the native and interface traits.
-  for (const auto &trait : op.getTraits()) {
-    if (auto opTrait = dyn_cast<tblgen::NativeOpTrait>(&trait))
-      opClass.addTrait(opTrait->getTrait());
-    else if (auto opTrait = dyn_cast<tblgen::InterfaceOpTrait>(&trait))
-      opClass.addTrait(opTrait->getTrait());
-  }
 
   // Add variadic size trait and normal op traits.
   int numOperands = op.getNumOperands();
@@ -1554,6 +1600,14 @@ void OpEmitter::genTraits() {
       opClass.addTrait("OpTrait::NOperands<" + Twine(numOperands) + ">::Impl");
       break;
     }
+  }
+
+  // Add the native and interface traits.
+  for (const auto &trait : op.getTraits()) {
+    if (auto opTrait = dyn_cast<tblgen::NativeOpTrait>(&trait))
+      opClass.addTrait(opTrait->getTrait());
+    else if (auto opTrait = dyn_cast<tblgen::InterfaceOpTrait>(&trait))
+      opClass.addTrait(opTrait->getTrait());
   }
 }
 

@@ -2154,7 +2154,7 @@ bool GDBRemoteCommunicationClient::GetCurrentProcessInfo(bool allow_lazy) {
 uint32_t GDBRemoteCommunicationClient::FindProcesses(
     const ProcessInstanceInfoMatch &match_info,
     ProcessInstanceInfoList &process_infos) {
-  process_infos.Clear();
+  process_infos.clear();
 
   if (m_supports_qfProcessInfo) {
     StreamString packet;
@@ -2234,7 +2234,7 @@ uint32_t GDBRemoteCommunicationClient::FindProcesses(
         ProcessInstanceInfo process_info;
         if (!DecodeProcessInfoResponse(response, process_info))
           break;
-        process_infos.Append(process_info);
+        process_infos.push_back(process_info);
         response = StringExtractorGDBRemote();
       } while (SendPacketAndWaitForResponse("qsProcessInfo", response, false) ==
                PacketResult::Success);
@@ -2243,7 +2243,7 @@ uint32_t GDBRemoteCommunicationClient::FindProcesses(
       return 0;
     }
   }
-  return process_infos.GetSize();
+  return process_infos.size();
 }
 
 bool GDBRemoteCommunicationClient::GetUserName(uint32_t uid,
@@ -2797,12 +2797,10 @@ size_t GDBRemoteCommunicationClient::GetCurrentThreadIDs(
       thread_ids.push_back(1);
     }
   } else {
-#if !defined(LLDB_CONFIGURATION_DEBUG)
     Log *log(ProcessGDBRemoteLog::GetLogIfAnyCategoryIsSet(GDBR_LOG_PROCESS |
                                                            GDBR_LOG_PACKETS));
-    LLDB_LOGF(log, "error: failed to get packet sequence mutex, not sending "
-                   "packet 'qfThreadInfo'");
-#endif
+    LLDB_LOG(log, "error: failed to get packet sequence mutex, not sending "
+                  "packet 'qfThreadInfo'");
     sequence_mutex_unavailable = true;
   }
   return thread_ids.size();

@@ -3131,7 +3131,8 @@ unsigned BoUpSLP::canMapToVector(Type *T, const DataLayout &DL) const {
   unsigned N = 1;
   Type *EltTy = T;
 
-  while (isa<CompositeType>(EltTy)) {
+  while (isa<StructType>(EltTy) || isa<ArrayType>(EltTy) ||
+         isa<VectorType>(EltTy)) {
     if (auto *ST = dyn_cast<StructType>(EltTy)) {
       // Check that struct is homogeneous.
       for (const auto *Ty : ST->elements())
@@ -3139,10 +3140,13 @@ unsigned BoUpSLP::canMapToVector(Type *T, const DataLayout &DL) const {
           return 0;
       N *= ST->getNumElements();
       EltTy = *ST->element_begin();
+    } else if (auto *AT = dyn_cast<ArrayType>(EltTy)) {
+      N *= AT->getNumElements();
+      EltTy = AT->getElementType();
     } else {
-      auto *SeqT = cast<SequentialType>(EltTy);
-      N *= SeqT->getNumElements();
-      EltTy = SeqT->getElementType();
+      auto *VT = cast<VectorType>(EltTy);
+      N *= VT->getNumElements();
+      EltTy = VT->getElementType();
     }
   }
 
@@ -4367,11 +4371,9 @@ Value *BoUpSLP::vectorizeTree(TreeEntry *E) {
       if (getTreeEntry(PO))
         ExternalUses.push_back(ExternalUser(PO, cast<User>(VecPtr), 0));
 
-      MaybeAlign Alignment = MaybeAlign(LI->getAlignment());
-      LI = Builder.CreateLoad(VecTy, VecPtr);
-      if (!Alignment)
-        Alignment = MaybeAlign(DL->getABITypeAlignment(ScalarLoadTy));
-      LI->setAlignment(Alignment);
+      Align Alignment = DL->getValueOrABITypeAlignment(LI->getAlign(),
+                                                       ScalarLoadTy);
+      LI = Builder.CreateAlignedLoad(VecTy, VecPtr, Alignment);
       Value *V = propagateMetadata(LI, E->Scalars);
       if (IsReorder) {
         OrdersType Mask;
@@ -5308,8 +5310,10 @@ unsigned BoUpSLP::getVectorElementSize(Value *V) const {
   // of memory operations where possible.
   SmallVector<Instruction *, 16> Worklist;
   SmallPtrSet<Instruction *, 16> Visited;
-  if (auto *I = dyn_cast<Instruction>(V))
+  if (auto *I = dyn_cast<Instruction>(V)) {
     Worklist.push_back(I);
+    Visited.insert(I);
+  }
 
   // Traverse the expression tree in bottom-up order looking for loads. If we
   // encounter an instruction we don't yet handle, we give up.
@@ -5317,7 +5321,6 @@ unsigned BoUpSLP::getVectorElementSize(Value *V) const {
   auto FoundUnknownInst = false;
   while (!Worklist.empty() && !FoundUnknownInst) {
     auto *I = Worklist.pop_back_val();
-    Visited.insert(I);
 
     // We should only be looking at scalar instructions here. If the current
     // instruction has a vector type, give up.
@@ -5337,7 +5340,7 @@ unsigned BoUpSLP::getVectorElementSize(Value *V) const {
              isa<CmpInst>(I) || isa<SelectInst>(I) || isa<BinaryOperator>(I)) {
       for (Use &U : I->operands())
         if (auto *J = dyn_cast<Instruction>(U.get()))
-          if (!Visited.count(J))
+          if (Visited.insert(J).second)
             Worklist.push_back(J);
     }
 
@@ -5899,25 +5902,15 @@ bool SLPVectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
   LLVM_DEBUG(dbgs() << "SLP: Trying to vectorize a list of length = "
                     << VL.size() << ".\n");
 
-  // Check that all of the parts are scalar instructions of the same type,
+  // Check that all of the parts are instructions of the same type,
   // we permit an alternate opcode via InstructionsState.
   InstructionsState S = getSameOpcode(VL);
   if (!S.getOpcode())
     return false;
 
   Instruction *I0 = cast<Instruction>(S.OpValue);
-  unsigned Sz = R.getVectorElementSize(I0);
-  unsigned MinVF = std::max(2U, R.getMinVecRegSize() / Sz);
-  unsigned MaxVF = std::max<unsigned>(PowerOf2Floor(VL.size()), MinVF);
-  if (MaxVF < 2) {
-    R.getORE()->emit([&]() {
-      return OptimizationRemarkMissed(SV_NAME, "SmallVF", I0)
-             << "Cannot SLP vectorize list: vectorization factor "
-             << "less than 2 is not supported";
-    });
-    return false;
-  }
-
+  // Make sure invalid types (including vector type) are rejected before
+  // determining vectorization factor for scalar instructions.
   for (Value *V : VL) {
     Type *Ty = V->getType();
     if (!isValidElementType(Ty)) {
@@ -5933,6 +5926,18 @@ bool SLPVectorizerPass::tryToVectorizeList(ArrayRef<Value *> VL, BoUpSLP &R,
       });
       return false;
     }
+  }
+
+  unsigned Sz = R.getVectorElementSize(I0);
+  unsigned MinVF = std::max(2U, R.getMinVecRegSize() / Sz);
+  unsigned MaxVF = std::max<unsigned>(PowerOf2Floor(VL.size()), MinVF);
+  if (MaxVF < 2) {
+    R.getORE()->emit([&]() {
+      return OptimizationRemarkMissed(SV_NAME, "SmallVF", I0)
+             << "Cannot SLP vectorize list: vectorization factor "
+             << "less than 2 is not supported";
+    });
+    return false;
   }
 
   bool Changed = false;

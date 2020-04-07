@@ -1,4 +1,4 @@
-//===- ParallelLoopSpecialization.cpp - loop.parallel specializeation -----===//
+//===- ParallelLoopSpecialization.cpp - loop.parallel specialization ------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -10,7 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/Dialect/AffineOps/AffineOps.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/LoopOps/LoopOps.h"
 #include "mlir/Dialect/LoopOps/Passes.h"
 #include "mlir/Dialect/StandardOps/IR/Ops.h"
@@ -61,6 +61,10 @@ static void specializeLoopForUnrolling(ParallelOp op) {
 namespace {
 struct ParallelLoopSpecialization
     : public FunctionPass<ParallelLoopSpecialization> {
+/// Include the generated pass utilities.
+#define GEN_PASS_LoopParallelLoopSpecialization
+#include "mlir/Dialect/LoopOps/Passes.h.inc"
+
   void runOnFunction() override {
     getFunction().walk([](ParallelOp op) { specializeLoopForUnrolling(op); });
   }
@@ -70,7 +74,3 @@ struct ParallelLoopSpecialization
 std::unique_ptr<Pass> mlir::createParallelLoopSpecializationPass() {
   return std::make_unique<ParallelLoopSpecialization>();
 }
-
-static PassRegistration<ParallelLoopSpecialization>
-    pass("parallel-loop-specialization",
-         "Specialize parallel loops for vectorization.");

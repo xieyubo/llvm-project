@@ -38,8 +38,11 @@ static LogicalResult runMLIRPasses(ModuleOp module) {
   passManager.addPass(createConvertGPUToSPIRVPass());
   OpPassManager &modulePM = passManager.nest<spirv::ModuleOp>();
   modulePM.addPass(spirv::createLowerABIAttributesPass());
+  modulePM.addPass(spirv::createUpdateVersionCapabilityExtensionPass());
   passManager.addPass(createConvertGpuLaunchFuncToVulkanLaunchFuncPass());
-  passManager.addPass(createLowerToLLVMPass());
+  passManager.addPass(createLowerToLLVMPass(/*useAlloca=*/false,
+                                            /*useBarePtrCallConv=*/false,
+                                            /*emitCWrappers=*/true));
   passManager.addPass(createConvertVulkanLaunchFuncToVulkanCallsPass());
   return passManager.run(module);
 }

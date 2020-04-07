@@ -611,9 +611,15 @@ void CGDebugInfo::CreateCompileUnit() {
       remapDIPath(MainFileName), remapDIPath(getCurrentDirname()), CSInfo,
       getSource(SM, SM.getMainFileID()));
 
-  StringRef Sysroot;
-  if (CGM.getCodeGenOpts().getDebuggerTuning() == llvm::DebuggerKind::LLDB)
+  StringRef Sysroot, SDK;
+  if (CGM.getCodeGenOpts().getDebuggerTuning() == llvm::DebuggerKind::LLDB) {
     Sysroot = CGM.getHeaderSearchOpts().Sysroot;
+    auto B = llvm::sys::path::rbegin(Sysroot);
+    auto E = llvm::sys::path::rend(Sysroot);
+    auto It = std::find_if(B, E, [](auto SDK) { return SDK.endswith(".sdk"); });
+    if (It != E)
+      SDK = *It;
+  }
 
   // Create new compile unit.
   TheCU = DBuilder.createCompileUnit(
@@ -625,7 +631,7 @@ void CGDebugInfo::CreateCompileUnit() {
           ? llvm::DICompileUnit::DebugNameTableKind::None
           : static_cast<llvm::DICompileUnit::DebugNameTableKind>(
                 CGOpts.DebugNameTable),
-      CGOpts.DebugRangesBaseAddress, Sysroot);
+      CGOpts.DebugRangesBaseAddress, remapDIPath(Sysroot), SDK);
 }
 
 llvm::DIType *CGDebugInfo::CreateType(const BuiltinType *BT) {
@@ -1810,10 +1816,12 @@ CGDebugInfo::CollectTemplateParams(const TemplateParameterList *TPList,
       if (TPList && CGM.getCodeGenOpts().DwarfVersion >= 5)
         if (auto *templateType =
                 dyn_cast_or_null<NonTypeTemplateParmDecl>(TPList->getParam(i)))
-          if (templateType->hasDefaultArgument())
-            defaultParameter =
+          if (templateType->hasDefaultArgument() &&
+              !templateType->getDefaultArgument()->isValueDependent())
+            defaultParameter = llvm::APSInt::isSameValue(
                 templateType->getDefaultArgument()->EvaluateKnownConstInt(
-                    CGM.getContext()) == TA.getAsIntegral();
+                    CGM.getContext()),
+                TA.getAsIntegral());
 
       TemplateParams.push_back(DBuilder.createTemplateValueParameter(
           TheCU, Name, TTy, defaultParameter,
@@ -2253,12 +2261,11 @@ static bool shouldOmitDefinition(codegenoptions::DebugInfoKind DebugKind,
   // constructor is emitted. Skip this optimization if the class or any of
   // its methods are marked dllimport.
   if (DebugKind == codegenoptions::DebugInfoConstructor &&
-      !CXXDecl->isLambda() && !isClassOrMethodDLLImport(CXXDecl)) {
-    for (const auto *Ctor : CXXDecl->ctors()) {
+      !CXXDecl->isLambda() && !CXXDecl->hasConstexprNonCopyMoveConstructor() &&
+      !isClassOrMethodDLLImport(CXXDecl))
+    for (const auto *Ctor : CXXDecl->ctors())
       if (Ctor->isUserProvided())
         return true;
-    }
-  }
 
   TemplateSpecializationKind Spec = TSK_Undeclared;
   if (const auto *SD = dyn_cast<ClassTemplateSpecializationDecl>(RD))
@@ -2477,6 +2484,17 @@ llvm::DIModule *CGDebugInfo::getOrCreateModuleRef(ASTSourceDescriptor Mod,
     assert(StringRef(M->Name).startswith(CGM.getLangOpts().ModuleName) &&
            "clang module without ASTFile must be specified by -fmodule-name");
 
+  // Return a StringRef to the remapped Path.
+  auto RemapPath = [this](StringRef Path) -> std::string {
+    std::string Remapped = remapDIPath(Path);
+    StringRef Relative(Remapped);
+    StringRef CompDir = TheCU->getDirectory();
+    if (Relative.consume_front(CompDir))
+      Relative.consume_front(llvm::sys::path::get_separator());
+
+    return Relative.str();
+  };
+
   if (CreateSkeletonCU && IsRootModule && !Mod.getASTFile().empty()) {
     // PCH files don't have a signature field in the control block,
     // but LLVM detects skeleton CUs by looking for a non-zero DWO id.
@@ -2486,12 +2504,16 @@ llvm::DIModule *CGDebugInfo::getOrCreateModuleRef(ASTSourceDescriptor Mod,
             ? (uint64_t)Mod.getSignature()[1] << 32 | Mod.getSignature()[0]
             : ~1ULL;
     llvm::DIBuilder DIB(CGM.getModule());
-    DIB.createCompileUnit(TheCU->getSourceLanguage(),
-                          // TODO: Support "Source" from external AST providers?
-                          DIB.createFile(Mod.getModuleName(), Mod.getPath()),
-                          TheCU->getProducer(), true, StringRef(), 0,
-                          Mod.getASTFile(), llvm::DICompileUnit::FullDebug,
-                          Signature);
+    SmallString<0> PCM;
+    if (!llvm::sys::path::is_absolute(Mod.getASTFile()))
+      PCM = Mod.getPath();
+    llvm::sys::path::append(PCM, Mod.getASTFile());
+    DIB.createCompileUnit(
+        TheCU->getSourceLanguage(),
+        // TODO: Support "Source" from external AST providers?
+        DIB.createFile(Mod.getModuleName(), TheCU->getDirectory()),
+        TheCU->getProducer(), false, StringRef(), 0, RemapPath(PCM),
+        llvm::DICompileUnit::FullDebug, Signature);
     DIB.finalize();
   }
 
@@ -2499,9 +2521,10 @@ llvm::DIModule *CGDebugInfo::getOrCreateModuleRef(ASTSourceDescriptor Mod,
       IsRootModule ? nullptr
                    : getOrCreateModuleRef(ASTSourceDescriptor(*M->Parent),
                                           CreateSkeletonCU);
+  std::string IncludePath = Mod.getPath().str();
   llvm::DIModule *DIMod =
       DBuilder.createModule(Parent, Mod.getModuleName(), ConfigMacros,
-                            Mod.getPath());
+                            RemapPath(IncludePath));
   ModuleCache[M].reset(DIMod);
   return DIMod;
 }

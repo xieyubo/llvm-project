@@ -90,6 +90,7 @@ struct Configuration {
   uint32_t andFeatures = 0;
   llvm::CachePruningPolicy thinLTOCachePolicy;
   llvm::StringMap<uint64_t> sectionStartMap;
+  llvm::StringRef bfdname;
   llvm::StringRef chroot;
   llvm::StringRef dynamicLinker;
   llvm::StringRef dwoDir;
@@ -245,7 +246,7 @@ struct Configuration {
   unsigned ltoPartitions;
   unsigned ltoo;
   unsigned optimize;
-  unsigned thinLTOJobs;
+  StringRef thinLTOJobs;
   unsigned timeTraceGranularity;
   int32_t splitStackAdjustSize;
 

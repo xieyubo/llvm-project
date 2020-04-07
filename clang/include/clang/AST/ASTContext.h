@@ -116,6 +116,7 @@ class ObjCPropertyDecl;
 class ObjCPropertyImplDecl;
 class ObjCProtocolDecl;
 class ObjCTypeParamDecl;
+class OMPTraitInfo;
 struct ParsedTargetAttr;
 class Preprocessor;
 class Stmt;
@@ -969,7 +970,7 @@ public:
 #include "clang/Basic/OpenCLImageTypes.def"
   CanQualType OCLSamplerTy, OCLEventTy, OCLClkEventTy;
   CanQualType OCLQueueTy, OCLReserveIDTy;
-  CanQualType OMPArraySectionTy;
+  CanQualType OMPArraySectionTy, OMPArrayShapingTy, OMPIteratorTy;
 #define EXT_OPAQUE_TYPE(ExtType, Id, Ext) \
   CanQualType Id##Ty;
 #include "clang/Basic/OpenCLExtensionTypes.def"
@@ -1275,6 +1276,12 @@ public:
   /// Returns a vla type where known sizes are replaced with [*].
   QualType getVariableArrayDecayedType(QualType Ty) const;
 
+  /// Return the unique reference to a scalable vector type of the specified
+  /// element type and scalable number of elements.
+  ///
+  /// \pre \p EltTy must be a built-in type.
+  QualType getScalableVectorType(QualType EltTy, unsigned NumElts) const;
+
   /// Return the unique reference to a vector type of the specified
   /// element type and size.
   ///
@@ -1435,6 +1442,8 @@ public:
 
   QualType getObjCTypeParamType(const ObjCTypeParamDecl *Decl,
                                 ArrayRef<ObjCProtocolDecl *> protocols) const;
+  void adjustObjCTypeParamBoundType(const ObjCTypeParamDecl *Orig,
+                                    ObjCTypeParamDecl *New) const;
 
   bool ObjCObjectAdoptsQTypeProtocols(QualType QT, ObjCInterfaceDecl *Decl);
 
@@ -2956,6 +2965,14 @@ public:
   };
 
   llvm::StringMap<SectionInfo> SectionInfos;
+
+  /// Return a new OMPTraitInfo object owned by this context.
+  OMPTraitInfo &getNewOMPTraitInfo();
+
+private:
+  /// All OMPTraitInfo objects live in this collection, one per
+  /// `pragma omp [begin] declare variant` directive.
+  SmallVector<OMPTraitInfo *, 4> OMPTraitInfoVector;
 };
 
 /// Utility function for constructing a nullary selector.

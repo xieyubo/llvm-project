@@ -1,4 +1,4 @@
-// RUN: mlir-opt %s -split-input-file -verify-diagnostics
+// RUN: mlir-opt -allow-unregistered-dialect %s -split-input-file -verify-diagnostics
 
 func @dim(tensor<1xf32>) {
 ^bb(%0: tensor<1xf32>):
@@ -58,7 +58,7 @@ func @constant_wrong_type() {
 func @affine_apply_no_map() {
 ^bb0:
   %i = constant 0 : index
-  %x = "affine.apply" (%i) { } : (index) -> (index) //  expected-error {{'affine.apply' op requires an affine map}}
+  %x = "affine.apply" (%i) { } : (index) -> (index) //  expected-error {{'affine.apply' op requires attribute 'map'}}
   return
 }
 

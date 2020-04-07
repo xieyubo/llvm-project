@@ -37,9 +37,6 @@ def SDT_PPCstore_scal_int_from_vsr : SDTypeProfile<0, 3, [
 def SDT_PPCVexts  : SDTypeProfile<1, 2, [
   SDTCisVT<0, f64>, SDTCisVT<1, f64>, SDTCisPtrTy<2>
 ]>;
-def SDT_PPCSExtVElems  : SDTypeProfile<1, 1, [
-  SDTCisVec<0>, SDTCisVec<1>
-]>;
 
 def SDT_PPCCallSeqStart : SDCallSeqStart<[ SDTCisVT<0, i32>,
                                            SDTCisVT<1, i32> ]>;
@@ -151,7 +148,6 @@ def PPClxsizx : SDNode<"PPCISD::LXSIZX", SDT_PPCLxsizx,
 def PPCstxsix : SDNode<"PPCISD::STXSIX", SDT_PPCstxsix,
                        [SDNPHasChain, SDNPMayStore]>;
 def PPCVexts  : SDNode<"PPCISD::VEXTS", SDT_PPCVexts, []>;
-def PPCSExtVElems  : SDNode<"PPCISD::SExtVElems", SDT_PPCSExtVElems, []>;
 
 // Extract FPSCR (not modeled at the DAG level).
 def PPCmffs   : SDNode<"PPCISD::MFFS",
@@ -754,7 +750,9 @@ def PPCDirectBrAsmOperand : AsmOperandClass {
 def directbrtarget : Operand<OtherVT> {
   let PrintMethod = "printBranchOperand";
   let EncoderMethod = "getDirectBrEncoding";
+  let DecoderMethod = "decodeDirectBrTarget";
   let ParserMatchClass = PPCDirectBrAsmOperand;
+  let OperandType = "OPERAND_PCREL";
 }
 def absdirectbrtarget : Operand<OtherVT> {
   let PrintMethod = "printAbsBranchOperand";
@@ -768,7 +766,9 @@ def PPCCondBrAsmOperand : AsmOperandClass {
 def condbrtarget : Operand<OtherVT> {
   let PrintMethod = "printBranchOperand";
   let EncoderMethod = "getCondBrEncoding";
+  let DecoderMethod = "decodeCondBrTarget";
   let ParserMatchClass = PPCCondBrAsmOperand;
+  let OperandType = "OPERAND_PCREL";
 }
 def abscondbrtarget : Operand<OtherVT> {
   let PrintMethod = "printAbsBranchOperand";
@@ -778,7 +778,7 @@ def abscondbrtarget : Operand<OtherVT> {
 def calltarget : Operand<iPTR> {
   let PrintMethod = "printBranchOperand";
   let EncoderMethod = "getDirectBrEncoding";
-  let DecoderMethod = "DecodePCRel24BranchTarget";
+  let DecoderMethod = "decodeDirectBrTarget";
   let ParserMatchClass = PPCDirectBrAsmOperand;
   let OperandType = "OPERAND_PCREL";
 }
@@ -3217,7 +3217,7 @@ def PPC32GOT: PPCEmitTimePseudo<(outs gprc:$rD), (ins), "#PPC32GOT",
 def PPC32PICGOT: PPCEmitTimePseudo<(outs gprc:$rD, gprc:$rT), (ins), "#PPC32PICGOT", 
                 []>, NoEncode<"$rT">;
 
-def LDgotTprelL32: PPCEmitTimePseudo<(outs gprc:$rD), (ins s16imm:$disp, gprc_nor0:$reg),
+def LDgotTprelL32: PPCEmitTimePseudo<(outs gprc_nor0:$rD), (ins s16imm:$disp, gprc_nor0:$reg),
                            "#LDgotTprelL32",
                            [(set i32:$rD,
                              (PPCldGotTprelL tglobaltlsaddr:$disp, i32:$reg))]>;
@@ -4617,19 +4617,6 @@ def : InstAlias<"mfdccr $Rx", (MFSPR gprc:$Rx, 1018)>, Requires<[IsPPC4xx]>;
 
 def : InstAlias<"mticcr $Rx", (MTSPR 1019, gprc:$Rx)>, Requires<[IsPPC4xx]>;
 def : InstAlias<"mficcr $Rx", (MFSPR gprc:$Rx, 1019)>, Requires<[IsPPC4xx]>;
-
-def : InstAlias<"mtasr $RS", (MTSPR 280, gprc:$RS)>;
-
-def : InstAlias<"mfdec $RT", (MFSPR gprc:$RT, 22)>;
-def : InstAlias<"mtdec $RT", (MTSPR 22, gprc:$RT)>;
-
-def : InstAlias<"mfsdr1 $RT", (MFSPR gprc:$RT, 25)>;
-def : InstAlias<"mtsdr1 $RT", (MTSPR 25, gprc:$RT)>;
-
-def : InstAlias<"mfsrr0 $RT", (MFSPR gprc:$RT, 26)>;
-def : InstAlias<"mfsrr1 $RT", (MFSPR gprc:$RT, 27)>;
-def : InstAlias<"mtsrr0 $RT", (MTSPR 26, gprc:$RT)>;
-def : InstAlias<"mtsrr1 $RT", (MTSPR 27, gprc:$RT)>;
 
 
 def : InstAlias<"tlbie $RB", (TLBIE R0, gprc:$RB)>;

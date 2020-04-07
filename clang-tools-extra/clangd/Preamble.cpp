@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Preamble.h"
+#include "Compiler.h"
 #include "Logger.h"
 #include "Trace.h"
 #include "clang/Basic/SourceLocation.h"
@@ -75,21 +76,20 @@ private:
 
 } // namespace
 
-PreambleData::PreambleData(llvm::StringRef Version,
+PreambleData::PreambleData(const ParseInputs &Inputs,
                            PrecompiledPreamble Preamble,
                            std::vector<Diag> Diags, IncludeStructure Includes,
                            MainFileMacros Macros,
                            std::unique_ptr<PreambleFileStatusCache> StatCache,
                            CanonicalIncludes CanonIncludes)
-    : Version(Version), Preamble(std::move(Preamble)), Diags(std::move(Diags)),
+    : Version(Inputs.Version), CompileCommand(Inputs.CompileCommand),
+      Preamble(std::move(Preamble)), Diags(std::move(Diags)),
       Includes(std::move(Includes)), Macros(std::move(Macros)),
       StatCache(std::move(StatCache)), CanonIncludes(std::move(CanonIncludes)) {
 }
 
 std::shared_ptr<const PreambleData>
-buildPreamble(PathRef FileName, CompilerInvocation &CI,
-              std::shared_ptr<const PreambleData> OldPreamble,
-              const tooling::CompileCommand &OldCompileCommand,
+buildPreamble(PathRef FileName, CompilerInvocation CI,
               const ParseInputs &Inputs, bool StoreInMemory,
               PreambleParsedCallback PreambleCallback) {
   // Note that we don't need to copy the input contents, preamble can live
@@ -98,22 +98,6 @@ buildPreamble(PathRef FileName, CompilerInvocation &CI,
       llvm::MemoryBuffer::getMemBuffer(Inputs.Contents, FileName);
   auto Bounds =
       ComputePreambleBounds(*CI.getLangOpts(), ContentsBuffer.get(), 0);
-
-  if (OldPreamble &&
-      compileCommandsAreEqual(Inputs.CompileCommand, OldCompileCommand) &&
-      OldPreamble->Preamble.CanReuse(CI, ContentsBuffer.get(), Bounds,
-                                     Inputs.FS.get())) {
-    vlog("Reusing preamble version {0} for version {1} of {2}",
-         OldPreamble->Version, Inputs.Version, FileName);
-    return OldPreamble;
-  }
-  if (OldPreamble)
-    vlog("Rebuilding invalidated preamble for {0} version {1} "
-         "(previous was version {2})",
-         FileName, Inputs.Version, OldPreamble->Version);
-  else
-    vlog("Building first preamble for {0} verson {1}", FileName,
-         Inputs.Version);
 
   trace::Span Tracer("BuildPreamble");
   SPAN_ATTACH(Tracer, "File", FileName);
@@ -129,6 +113,10 @@ buildPreamble(PathRef FileName, CompilerInvocation &CI,
   // We don't want to write comment locations into PCH. They are racy and slow
   // to read back. We rely on dynamic index for the comments instead.
   CI.getPreprocessorOpts().WriteCommentListToPCH = false;
+
+  // Recovery expression currently only works for C++.
+  if (CI.getLangOpts()->CPlusPlus)
+    CI.getLangOpts()->RecoveryAST = Inputs.Opts.BuildRecoveryAST;
 
   CppFilePreambleCallbacks SerializedDeclsCollector(FileName, PreambleCallback);
   if (Inputs.FS->setCurrentWorkingDirectory(Inputs.CompileCommand.Directory)) {
@@ -155,16 +143,28 @@ buildPreamble(PathRef FileName, CompilerInvocation &CI,
          BuiltPreamble->getSize(), FileName, Inputs.Version);
     std::vector<Diag> Diags = PreambleDiagnostics.take();
     return std::make_shared<PreambleData>(
-        Inputs.Version, std::move(*BuiltPreamble), std::move(Diags),
+        Inputs, std::move(*BuiltPreamble), std::move(Diags),
         SerializedDeclsCollector.takeIncludes(),
         SerializedDeclsCollector.takeMacros(), std::move(StatCache),
         SerializedDeclsCollector.takeCanonicalIncludes());
   } else {
-    elog("Could not build a preamble for file {0} version {2}", FileName,
+    elog("Could not build a preamble for file {0} version {1}", FileName,
          Inputs.Version);
     return nullptr;
   }
 }
 
+bool isPreambleCompatible(const PreambleData &Preamble,
+                          const ParseInputs &Inputs, PathRef FileName,
+                          const CompilerInvocation &CI) {
+  auto ContentsBuffer =
+      llvm::MemoryBuffer::getMemBuffer(Inputs.Contents, FileName);
+  auto Bounds =
+      ComputePreambleBounds(*CI.getLangOpts(), ContentsBuffer.get(), 0);
+  return compileCommandsAreEqual(Inputs.CompileCommand,
+                                 Preamble.CompileCommand) &&
+         Preamble.Preamble.CanReuse(CI, ContentsBuffer.get(), Bounds,
+                                    Inputs.FS.get());
+}
 } // namespace clangd
 } // namespace clang

@@ -398,7 +398,8 @@ static void instantiateOMPDeclareVariantAttr(
 
   // Copy the template version of the OMPTraitInfo and run substitute on all
   // score and condition expressiosn.
-  OMPTraitInfo TI = Attr.getTraitInfos();
+  OMPTraitInfo &TI = S.getASTContext().getNewOMPTraitInfo();
+  TI = *Attr.getTraitInfos();
 
   // Try to substitute template parameters in score and condition expressions.
   auto SubstScoreOrConditionExpr = [&S, Subst](Expr *&E, bool) {
@@ -2039,7 +2040,7 @@ Decl *TemplateDeclInstantiator::VisitFunctionDecl(
     // Look only into the namespace where the friend would be declared to
     // find a previous declaration. This is the innermost enclosing namespace,
     // as described in ActOnFriendFunctionDecl.
-    SemaRef.LookupQualifiedName(Previous, DC);
+    SemaRef.LookupQualifiedName(Previous, DC->getRedeclContext());
 
     // In C++, the previous declaration we find might be a tag type
     // (class or enum). In this case, the new declaration will hide the
