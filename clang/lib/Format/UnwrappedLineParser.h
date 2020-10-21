@@ -80,6 +80,7 @@ public:
                       UnwrappedLineConsumer &Callback);
 
   void parse();
+  void braceCheck(const SourceManager &SourceMgr);
 
 private:
   void reset();
