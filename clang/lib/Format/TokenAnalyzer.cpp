@@ -74,6 +74,7 @@ std::pair<tooling::Replacements, unsigned> TokenAnalyzer::process() {
   SmallVector<FormatToken *, 10> Tokens(Toks.begin(), Toks.end());
   UnwrappedLineParser Parser(Style, Lex.getKeywords(),
                              Env.getFirstStartColumn(), Tokens, *this);
+  Parser.braceCheck(Env.getSourceManager());
   Parser.parse();
   assert(UnwrappedLines.rbegin()->empty());
   unsigned Penalty = 0;

@@ -14,11 +14,13 @@
 
 #include "UnwrappedLineParser.h"
 #include "FormatToken.h"
+#include "clang/Basic/SourceManager.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
+#include <iostream>
 
 #define DEBUG_TYPE "format-parser"
 
@@ -294,6 +296,101 @@ void UnwrappedLineParser::parse() {
       assert(PPLevelBranchIndex.back() <= PPLevelBranchCount.back());
     }
   } while (!PPLevelBranchIndex.empty());
+}
+
+void UnwrappedLineParser::braceCheck(const SourceManager &SourceMgr) {
+  for (auto it = AllTokens.begin();
+      it != AllTokens.end();
+      ++it) {
+    auto tk = (*it)->Tok.getKind();
+    if (tk == tok::kw_if || tk == tok::kw_while || tk == tok::kw_for) {
+      // Ignore comments between if/while/for and (
+      for (++it; it != AllTokens.end() && (tk = (*it)->Tok.getKind()) == tok::comment; ++it);
+
+      // If reach the end, return.
+      if (it == AllTokens.end()) {
+        return;
+      }
+
+      // If no (, it's invalid syntax, return also.
+      if (tk != tok::l_paren) {
+        return;
+      }
+
+      // Find the matched ).
+      int parenCount = 1;
+      for (++it; parenCount && it != AllTokens.end(); ++it) {
+        tk = (*it)->Tok.getKind();
+        if (tk == tok::l_paren) {
+          ++parenCount;
+        } else if (tk == tok::r_paren) {
+          --parenCount;
+        }
+      }
+
+      // Ignore comments between ) and {
+      for (; it != AllTokens.end() && (tk = (*it)->Tok.getKind()) == tok::comment; ++it);
+
+      // If reach the end, return.
+      if (it == AllTokens.end()) {
+        return;
+      }
+
+      // Output error if no {
+      if (tk != tok::l_brace) {
+        auto lineNumber = SourceMgr.getSpellingLineNumber((*it)->Tok.getLocation());
+        auto column = SourceMgr.getSpellingColumnNumber((*it)->Tok.getLocation());
+        std::cerr << "error: line: " << lineNumber << ", column: " << column << ", '{}' must be used." << std::endl;
+        exit(-1);
+      }
+
+      // continue to next if/while/for.
+    }
+    // For do
+    else if (tk == tok::kw_do) {
+      // Ignore comments between do and {
+      for (++it; it != AllTokens.end() && (tk = (*it)->Tok.getKind()) == tok::comment; ++it);
+
+      // If reach the end, return.
+      if (it == AllTokens.end()) {
+        return;
+      }
+
+      // Output error if no {
+      if (tk != tok::l_brace) {
+        auto lineNumber = SourceMgr.getSpellingLineNumber((*it)->Tok.getLocation());
+        auto column = SourceMgr.getSpellingColumnNumber((*it)->Tok.getLocation());
+        std::cerr << "error: line: " << lineNumber << ", column: " << column << ", '{}' must be used." << std::endl;
+        exit(-1);
+      }
+
+      // find the matched }
+      int braceCount = 1;
+      for (++it; braceCount && it != AllTokens.end(); ++it) {
+        tk = (*it)->Tok.getKind();
+        if (tk == tok::l_brace) {
+          ++braceCount;
+        } else if (tk == tok::r_brace) {
+          --braceCount;
+        }
+      }
+
+      // If reacth the end, return.
+      if (it == AllTokens.end()) {
+        return;
+      }
+
+      // Ignore comments
+      for (; it != AllTokens.end() && (tk = (*it)->Tok.getKind()) == tok::comment; ++it);
+
+      // Put back if it is not while.
+      if (tk != tok::kw_while) {
+        --it;
+      }
+
+      // continue to next do.
+    }
+  }
 }
 
 void UnwrappedLineParser::parseFile() {
